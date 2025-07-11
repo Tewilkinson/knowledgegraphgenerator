@@ -9,12 +9,15 @@ def get_knowledge_graph_data(query):
     params = {
         'query': query,
         'key': API_KEY,
-        'limit': 5,
+        'limit': 5,  # Number of results to return
         'indent': True
     }
     
     response = requests.get(url, params=params)
     data = response.json()
+    
+    # Print the entire response to inspect the data structure
+    st.write(data)
     
     if 'itemListElement' in data:
         return data['itemListElement']
@@ -36,10 +39,17 @@ if keyword:
         st.write(f"Found {len(entities)} related entities from Google Knowledge Graph:")
         for entity in entities:
             result = entity['result']
-            st.write(f"- Name: {result.get('name', 'N/A')}")
-            st.write(f"  Description: {result.get('description', 'N/A')}")
-            st.write(f"  Types: {result.get('type', 'N/A')}")
-            st.write(f"  URL: {result.get('url', 'N/A')}")
+            
+            # Check if data is available for each field, else display 'Data not available'
+            name = result.get('name', 'Data not available')
+            description = result.get('description', 'Description not available')
+            types = result.get('type', 'Types not available')
+            url = result.get('url', 'URL not available')
+            
+            st.write(f"- Name: {name}")
+            st.write(f"  Description: {description}")
+            st.write(f"  Types: {types}")
+            st.write(f"  URL: {url}")
             st.write("-" * 50)
     else:
         st.write("No related entities found.")
