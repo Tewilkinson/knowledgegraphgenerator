@@ -1,30 +1,70 @@
 import streamlit as st
+import requests
+import os
 import networkx as nx
 import matplotlib.pyplot as plt
-import requests
+from dotenv import load_dotenv
 
-# Function to get related entities from Wikipedia (instead of Wikidata)
-def get_related_entities_from_wikipedia(keyword):
-    url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={keyword}&format=json"
+# Load environment variables (API key and CSE ID)
+load_dotenv()
+
+# Get your API Key and Custom Search Engine ID from the environment variables
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+CSE_ID = os.getenv('CSE_ID')
+
+# Function to fetch related entities from Google Custom Search API
+def get_related_entities_from_google(keyword):
+    url = f'https://www.googleapis.com/customsearch/v1?q={keyword}&key={GOOGLE_API_KEY}&cx={CSE_ID}'
     response = requests.get(url)
-    search_results = response.json().get('query', {}).get('search', [])
+    
+    # Check if the request was successful
+    if response.status_code != 200:
+        st.error(f"Failed to fetch data from Google. HTTP Status code: {response.status_code}")
+        return []
+    
+    search_results = response.json().get('items', [])
     
     related_entities = []
     for result in search_results:
         related_entities.append({
             'title': result['title'],
+            'link': result['link'],
             'snippet': result['snippet'],
         })
     return related_entities
 
+# Function to fetch related entities from Wikidata API
+def get_related_entities_from_wikidata(keyword):
+    url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={keyword}&limit=10&format=json"
+    response = requests.get(url)
+    entities = response.json().get('search', [])
+    
+    related_entities = []
+    for entity in entities:
+        related_entities.append({
+            'id': entity['id'],
+            'label': entity['label'],
+            'description': entity.get('description', 'No description available')
+        })
+    return related_entities
+
 # Function to visualize knowledge graph
-def visualize_graph(entities):
+def visualize_graph(google_entities, wikidata_entities):
     G = nx.Graph()
     
-    # Add nodes and edges based on entities
-    for entity in entities:
-        G.add_node(entity['title'])
-        # You can add connections (edges) based on additional logic or metadata
+    # Add Google entities as nodes
+    for entity in google_entities:
+        G.add_node(entity['title'], type='google')
+    
+    # Add Wikidata entities as nodes
+    for entity in wikidata_entities:
+        G.add_node(entity['label'], type='wikidata')
+    
+    # Add edges (for now, we add edges between Google and Wikidata entities with the same name)
+    for google_entity in google_entities:
+        for wikidata_entity in wikidata_entities:
+            if google_entity['title'].lower() == wikidata_entity['label'].lower():
+                G.add_edge(google_entity['title'], wikidata_entity['label'])
     
     pos = nx.spring_layout(G)
     nx.draw(G, pos, with_labels=True, node_size=2000, node_color='skyblue', font_size=10)
@@ -33,19 +73,34 @@ def visualize_graph(entities):
     st.pyplot(plt)
 
 # Streamlit interface
-st.title("Wikipedia Knowledge Graph Visualization Tool")
+st.title("Google Custom Search and Wikidata Knowledge Graph Visualization Tool")
+
+# Input for entity or keyword
 keyword = st.text_input("Enter an entity or keyword:")
 
 if keyword:
-    st.write(f"Fetching related entities from Wikipedia for: {keyword}")
-    entities = get_related_entities_from_wikipedia(keyword)
+    st.write(f"Fetching related entities for: {keyword}")
     
-    if entities:
-        st.write(f"Found {len(entities)} related entities:")
-        for entity in entities:
-            st.write(f"- {entity['title']}: {entity['snippet']}")  # Show the title and snippet
-            
+    # Fetch related entities from Google Custom Search
+    google_entities = get_related_entities_from_google(keyword)
+    
+    # Fetch related entities from Wikidata
+    wikidata_entities = get_related_entities_from_wikidata(keyword)
+    
+    # Check if entities were found
+    if google_entities or wikidata_entities:
+        if google_entities:
+            st.write(f"Found {len(google_entities)} related entities from Google Custom Search:")
+            for entity in google_entities:
+                st.write(f"- {entity['title']}: {entity['snippet']}")
+                st.write(f"  Link: {entity['link']}")
+        
+        if wikidata_entities:
+            st.write(f"Found {len(wikidata_entities)} related entities from Wikidata:")
+            for entity in wikidata_entities:
+                st.write(f"- {entity['label']}: {entity.get('description', 'No description available')}")
+        
         # Visualize the knowledge graph
-        visualize_graph(entities)
+        visualize_graph(google_entities, wikidata_entities)
     else:
         st.write("No related entities found.")
