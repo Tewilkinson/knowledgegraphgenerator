@@ -1,150 +1,86 @@
+# app.py
+import os, json, tempfile
+from collections import deque
+
 import streamlit as st
-import requests
 import networkx as nx
-import plotly.graph_objects as go
+import community as community_louvain  # pip install python-louvain
+from pyvis.network import Network  # pip install pyvis
+from openai import OpenAI
 
-# ——————————————————————————————————————————————————————————————————————————————
-# 1. LOOKUP: label → Wikidata QID
-# ——————————————————————————————————————————————————————————————————————————————
-@st.cache_data(show_spinner=False)
-def lookup_qid(label: str) -> str:
-    r = requests.get(
-        "https://www.wikidata.org/w/api.php",
-        params={
-            "action": "wbsearchentities",
-            "format": "json",
-            "language": "en",
-            "search": label
-        },
+# ── 1) CONFIG ────────────────────────────────────────────────────────────────
+openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
+
+# ── 2) TRIPLE EXTRACTION ──────────────────────────────────────────────────────
+def extract_triples(concept: str, max_triples: int = 6):
+    prompt = f"""
+You’re a KG extractor. Given the concept "{concept}",  
+list up to {max_triples} related concepts as JSON array of  
+[subject, relation, object] triples.  
+Use relations like "subclass_of" or "related_to".
+""
+    resp = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
     )
-    r.raise_for_status()
-    return r.json()["search"][0]["id"]
+    return json.loads(resp.choices[0].message.content)
 
-# ——————————————————————————————————————————————————————————————————————————————
-# 2. TAXONOMY: direct subclasses (“Subtopics”) via P279
-# ——————————————————————————————————————————————————————————————————————————————
-@st.cache_data(show_spinner=False)
-def get_subclasses(qid: str, limit: int = 20):
-    sparql = f"""
-    SELECT ?child ?childLabel WHERE {{
-      ?child wdt:P279 wd:{qid} .
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-    }} LIMIT {limit}
-    """
-    r = requests.get(
-        "https://query.wikidata.org/sparql",
-        params={"query": sparql},
-        headers={"Accept": "application/sparql-results+json"}
-    )
-    r.raise_for_status()
-    rows = r.json()["results"]["bindings"]
-    return [
-        (row["child"]["value"].rsplit("/",1)[-1], row["childLabel"]["value"])
-        for row in rows
-    ]
-
-# ——————————————————————————————————————————————————————————————————————————————
-# 3. SEMANTIC: related neighbours (“Related Entities”) from ConceptNet
-# ——————————————————————————————————————————————————————————————————————————————
-@st.cache_data(show_spinner=False)
-def get_conceptnet_neighbors(concept: str, limit: int = 20):
-    uri = concept.lower().replace(" ", "_")
-    r = requests.get(
-        f"https://api.conceptnet.io/related/c/en/{uri}",
-        params={"filter":"/c/en","limit":limit}
-    )
-    r.raise_for_status()
-    rels = r.json().get("related", [])
-    return [
-        (e["@id"].split("/")[-1].replace("_"," "), e.get("weight",0))
-        for e in rels
-    ]
-
-# ——————————————————————————————————————————————————————————————————————————————
-# 4. BUILD the hybrid graph
-# ——————————————————————————————————————————————————————————————————————————————
-def build_graph(seed: str, depth: int, tax_limit: int, sem_limit: int) -> nx.Graph:
-    qid = lookup_qid(seed)
-    G = nx.Graph()
-    G.add_node(qid, label=seed, rel="seed")
-
-    # 1-hop Subtopics
-    for child_q, child_lbl in get_subclasses(qid, tax_limit):
-        G.add_node(child_q, label=child_lbl, rel="subtopic")
-        G.add_edge(qid, child_q)
-
-    # optional 2-hop Subtopics
-    if depth > 1:
-        first_level = [n for n,d in G.nodes(data=True) if d["rel"]=="subtopic"]
-        for n in first_level:
-            for cq, cl in get_subclasses(n, tax_limit//2):
-                if not G.has_node(cq):
-                    G.add_node(cq, label=cl, rel="subtopic")
-                G.add_edge(n, cq)
-
-    # 1-hop Related Entities
-    for lbl, _ in get_conceptnet_neighbors(seed, sem_limit):
-        nid = f"CN:{lbl}"
-        G.add_node(nid, label=lbl, rel="related")
-        G.add_edge(qid, nid)
-
+# ── 3) GRAPH BUILDING ─────────────────────────────────────────────────────────
+def build_graph(seed: str, depth: int = 2):
+    G = nx.DiGraph()
+    seen = {seed}
+    queue = deque([(seed, 0)])
+    while queue:
+        node, d = queue.popleft()
+        if d >= depth:
+            continue
+        try:
+            triples = extract_triples(node)
+        except Exception as e:
+            st.error(f"Failed to extract from “{node}”: {e}")
+            continue
+        for s, rel, o in triples:
+            G.add_node(s); G.add_node(o)
+            G.add_edge(s, o, relation=rel)
+            if o not in seen:
+                seen.add(o)
+                queue.append((o, d + 1))
     return G
 
-# ——————————————————————————————————————————————————————————————————————————————
-# 5. STREAMLIT UI
-# ——————————————————————————————————————————————————————————————————————————————
-st.set_page_config(layout="wide")
-st.title("🔗 Relationship-based Clustering")
-st.markdown("""
-1. Enter your **seed** topic  
-2. Pull **Subtopics** (Wikidata P279) and **Related Entities** (ConceptNet)  
-3. See three distinct bubbles: **Seed**, **Subtopics**, **Related Entities**  
-""")
+# ── 4) COMMUNITY DETECTION ────────────────────────────────────────────────────
+def detect_communities(G: nx.Graph):
+    # use Louvain on the undirected version
+    partition = community_louvain.best_partition(G.to_undirected())
+    return partition
 
-seed    = st.text_input("Seed topic", "data warehouse")
-depth   = st.slider("Subtopic depth", 1, 2, 1)
-tax_lim = st.slider("Max subtopics",   5, 50, 20)
-sem_lim = st.slider("Max related items",5, 50, 20)
+# ── 5) VISUALIZATION ──────────────────────────────────────────────────────────
+def visualize_pyvis(G: nx.DiGraph, partition: dict[int,int]):
+    net = Network(height="700px", width="100%", directed=True)
+    for node in G.nodes():
+        cid = partition.get(node, 0)
+        net.add_node(node, label=node, color=f"hsl({cid*60 % 360},70%,50%)")
+    for u, v, data in G.edges(data=True):
+        net.add_edge(u, v, title=data.get("relation", ""), arrowStrikethrough=False)
 
-if st.button("Generate Graph"):
-    G   = build_graph(seed, depth, tax_lim, sem_lim)
-    pos = nx.spring_layout(G, seed=42, k=0.5, iterations=50)
+    # write to a temp HTML and return its contents
+    path = tempfile.NamedTemporaryFile(delete=False, suffix=".html").name
+    net.show(path)
+    return open(path, "r", encoding="utf-8").read()
 
-    # Build edge trace
-    ex, ey = [], []
-    for u,v in G.edges():
-        x0,y0 = pos[u]; x1,y1 = pos[v]
-        ex += [x0,x1,None]; ey += [y0,y1,None]
-    edge_trace = go.Scatter(x=ex, y=ey, mode="lines",
-                            line=dict(color="#888",width=1), hoverinfo="none")
+# ── 6) STREAMLIT LAYOUT ───────────────────────────────────────────────────────
+st.title("🔍 Knowledge Graph Explorer")
 
-    # Build node traces per relationship type
-    traces = []
-    for rel_type, color in [("seed","#ff6961"),("subtopic","#61ff8e"),("related","#61b2ff")]:
-        xs, ys, txt = [], [], []
-        for n,d in G.nodes(data=True):
-            if d["rel"] == rel_type:
-                x,y = pos[n]
-                xs.append(x); ys.append(y); txt.append(d["label"])
-        traces.append(
-            go.Scatter(
-                x=xs, y=ys,
-                mode="markers+text",
-                text=txt,
-                textposition="top center",
-                marker=dict(size=20, color=color),
-                name=rel_type.capitalize().replace("_"," "),
-                hoverinfo="text"
-            )
-        )
+seed = st.text_input("Enter seed topic", value="Spatial data warehouse")
+depth = st.slider("Expansion depth", 1, 3, 2)
+max_triples = st.slider("Triples per node", 2, 8, 4)
 
-    # Assemble figure
-    fig = go.Figure(data=[edge_trace] + traces)
-    fig.update_layout(
-        showlegend=True,
-        margin=dict(l=20,r=20,t=40,b=20),
-        xaxis=dict(showgrid=False,zeroline=False,showticklabels=False),
-        yaxis=dict(showgrid=False,zeroline=False,showticklabels=False)
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
+if st.button("Build Graph"):
+    with st.spinner("⏳ Building knowledge graph…"):
+        G = build_graph(seed, depth)
+        if G.number_of_nodes() == 0:
+            st.warning("No nodes found. Try a different seed or depth.")
+        else:
+            partition = detect_communities(G)
+            html = visualize_pyvis(G, partition)
+            st.components.v1.html(html, height=700, scrolling=True)
