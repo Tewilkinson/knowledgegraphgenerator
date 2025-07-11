@@ -3,7 +3,6 @@
 import streamlit as st
 import requests, re
 import networkx as nx
-import numpy as np
 from pyvis.network import Network
 from SPARQLWrapper import SPARQLWrapper, JSON
 from openai import OpenAI
@@ -20,10 +19,10 @@ st.title("🔎 Hybrid GPT→Wikidata Knowledge Graph")
 with st.sidebar:
     seed       = st.text_input("Seed term", "data warehouse")
     gpt_count  = st.slider("GPT queries on seed", 5, 100, 50)
-    max_depth  = st.slider("Wikidata depth",    1,   5,  3)
+    max_depth  = st.slider("Wikidata depth",    1,   5,   3)
     build      = st.button("Build Graph")
 
-# legend
+# Legend
 st.markdown(
     "<span style='color:#1f78b4;'>🔵</span>Seed  "
     "<span style='color:#fc8d62;'>🟣</span>GPT  "
@@ -35,13 +34,13 @@ st.markdown(
 def get_seed_related_queries(term: str, n: int) -> list[str]:
     prompt = (
         f"Give me {n} concise, distinct search queries related to “{term}”. "
-        "Return them as a bulleted list with one query per line, no numbering."
+        "Return them as a bulleted list with one per line."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role":"system","content":"You are a helpful assistant."},
-            {"role":"user",  "content":prompt}
+          {"role":"system","content":"You are a helpful assistant."},
+          {"role":"user","content":prompt}
         ],
         temperature=0.7
     )
@@ -50,13 +49,13 @@ def get_seed_related_queries(term: str, n: int) -> list[str]:
     for ln in lines:
         ln = ln.strip()
         if not ln: continue
-        clean = re.sub(r"^[-•\s]+","",ln)
+        clean = re.sub(r"^[-•\s]+","", ln)
         out.append(clean)
     return out
 
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    """Simple Wikidata search→QID lookup."""
+    """Lookup QID via Wikidata API."""
     try:
         r = requests.get(WIKIDATA_API, params={
             "action":"wbsearchentities",
@@ -72,7 +71,7 @@ def search_qid(label: str) -> str | None:
 @st.cache_data
 def fetch_wikidata(qid: str) -> list[tuple[str,str]]:
     """
-    Returns [(predicateLabel, objectLabel), …] for P279, P31, P361.
+    Returns list of (predicateLabel, objectLabel) for P279/P31/P361.
     """
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
     sparql.setQuery(f"""
@@ -80,37 +79,47 @@ def fetch_wikidata(qid: str) -> list[tuple[str,str]]:
         VALUES ?p {{ wdt:P279 wdt:P31 wdt:P361 }}
         wd:{qid} ?p ?obj .
         SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-      }}""")
+      }}
+    """)
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
-    return [
-        (r["pLabel"]["value"], r["objLabel"]["value"])
-        for r in rows
-    ]
+    return [(r["pLabel"]["value"], r["objLabel"]["value"]) for r in rows]
 
 # ─── 4. BUILD GRAPH ────────────────────────────────────────
 def build_graph(seed: str, gpt_count: int, max_depth: int):
     G = nx.DiGraph()
 
-    # 4A) Add seed
+    # 4A) Seed node
     G.add_node(seed, label=seed, source="seed", depth=0)
 
-    # 4B) GPT queries around seed
+    # 4B) Wikidata off the seed
+    root_qid = search_qid(seed)
+    if root_qid:
+        for pred, obj_lbl in fetch_wikidata(root_qid):
+            # add node
+            G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=1)
+            # add edge
+            G.add_edge(seed, obj_lbl, predicate=pred)
+
+    # 4C) GPT queries around seed
     related = get_seed_related_queries(seed, gpt_count)
     for q in related:
         G.add_node(q, label=q, source="gpt", depth=1)
         G.add_edge(seed, q, predicate="related_query")
 
-    # 4C) Under each GPT node, recurse Wikidata
+    # 4D) Under each GPT node, recurse Wikidata
     def recurse(label: str, depth: int):
-        if depth > max_depth: 
+        if depth > max_depth:
             return
         qid = search_qid(label)
         if not qid:
             return
         for pred, obj_lbl in fetch_wikidata(qid):
             if not G.has_node(obj_lbl):
-                G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+1)
+                G.add_node(obj_lbl,
+                           label=obj_lbl,
+                           source="wikidata",
+                           depth=depth+1)
             G.add_edge(label, obj_lbl, predicate=pred)
             recurse(obj_lbl, depth+1)
 
@@ -125,10 +134,12 @@ def draw_pyvis(G: nx.DiGraph) -> str:
     for nid, data in G.nodes(data=True):
         src   = data["source"]
         color = {"seed":"#1f78b4","gpt":"#fc8d62","wikidata":"#66c2a5"}[src]
-        net.add_node(nid,
-                     label=data["label"],
-                     title=f"{src} (depth {data['depth']})",
-                     color=color)
+        net.add_node(
+            nid,
+            label=data["label"],
+            title=f"{src} (depth {data['depth']})",
+            color=color
+        )
     for u,v,d in G.edges(data=True):
         net.add_edge(u, v, title=d.get("predicate",""))
     net.show_buttons(filter_=['physics'])
@@ -139,5 +150,4 @@ if build:
     with st.spinner("Building hybrid graph…"):
         G = build_graph(seed, gpt_count, max_depth)
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
-    html = draw_pyvis(G)
-    st.components.v1.html(html, height=750, scrolling=True)
+    st.components.v1.html(draw_pyvis(G), height=750, scrolling=True)
