@@ -64,35 +64,21 @@ def build_full_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, 
 def draw_plotly_force_directed(G, show_subtopics, show_related, show_questions):
     pos = nx.spring_layout(G, k=0.3, iterations=50)
 
-    edge_trace = go.Scatter(
-        x=[],
-        y=[],
-        line=dict(width=0.5, color='#888'),
-        hoverinfo='none',
-        mode='lines'
-    )
-
+    edge_x, edge_y = [], []
     for edge in G.edges():
         x0, y0 = pos[edge[0]]
         x1, y1 = pos[edge[1]]
-        edge_trace['x'] += tuple([x0, x1, None])
-        edge_trace['y'] += tuple([y0, y1, None])
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
 
-    node_trace = go.Scatter(
-        x=[],
-        y=[],
-        text=[],
-        mode='markers+text',
-        hoverinfo='text',
-        textposition="bottom center",
-        marker=dict(
-            showscale=False,
-            color=[],
-            size=20,
-            line_width=2
-        )
-    )
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines')
 
+    node_x, node_y, node_text, node_color = [], [], [], []
     color_map = {"seed": "#34a853", "subtopic": "#4285f4", "related": "#fbbc05", "related_question": "#ea4335"}
 
     for node, data in G.nodes(data=True):
@@ -101,23 +87,31 @@ def draw_plotly_force_directed(G, show_subtopics, show_related, show_questions):
             (data['rel'] == 'related' and show_related) or
             (data['rel'] == 'related_question' and show_questions)):
             x, y = pos[node]
-            node_trace['x'] += tuple([x])
-            node_trace['y'] += tuple([y])
-            node_trace['text'] += tuple([data['label']])
-            node_trace['marker']['color'] += tuple([color_map.get(data['rel'], "#999")])
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(data['label'])
+            node_color.append(color_map.get(data['rel'], "#999"))
+
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode='markers+text',
+        text=node_text,
+        textposition="bottom center",
+        hoverinfo='text',
+        marker=dict(
+            color=node_color,
+            size=20,
+            line_width=2
+        ))
 
     fig = go.Figure(data=[edge_trace, node_trace],
                     layout=go.Layout(
-                        title='<br>Force-directed Knowledge Graph',
+                        title='Force-directed Knowledge Graph',
                         titlefont_size=16,
                         showlegend=False,
                         hovermode='closest',
-                        margin=dict(b=20,l=5,r=5,t=40),
-                        annotations=[dict(
-                            text="",
-                            showarrow=False,
-                            xref="paper", yref="paper"
-                        )],
+                        margin=dict(b=20, l=5, r=5, t=40),
                         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
                     ))
