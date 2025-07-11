@@ -6,9 +6,11 @@ from openai import OpenAI
 import json
 import pandas as pd
 import io
+from pytrends.request import TrendReq
 
 # ─── CONFIG ────────────────────────────────────────────
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+pytrends = TrendReq(hl='en-US', tz=360)
 
 # ─── HELPERS ────────────────────────────────────────────
 @st.cache_data
@@ -51,6 +53,25 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
                 items.append(clean)
         return items[:limit]
 
+def get_topic_trend(keyword):
+    try:
+        pytrends.build_payload([keyword], timeframe='today 12-m')
+        df = pytrends.interest_over_time()
+        if df.empty or keyword not in df:
+            return None
+
+        last_3 = df[keyword][-3:].mean()
+        prev_3 = df[keyword][-6:-3].mean()
+        yoy = ((df[keyword][-1] - df[keyword][0]) / df[keyword][0]) * 100 if df[keyword][0] != 0 else 0
+
+        return {
+            "volume": int(df[keyword].mean()),
+            "3mo_trend": "up" if last_3 > prev_3 else "down" if last_3 < prev_3 else "flat",
+            "yoy": round(yoy, 1)
+        }
+    except Exception:
+        return None
+
 # ─── BUILD GRAPH ─────────────────────────────────────────
 def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q):
     G = nx.Graph()
@@ -84,6 +105,16 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
         for q in questions:
             G.add_node(q, label=q, rel="related_question", depth=1)
             G.add_edge(seed, q)
+
+    # Add Google Trends data
+    for node in G.nodes:
+        label = G.nodes[node]["label"]
+        trend_data = get_topic_trend(label)
+        if trend_data:
+            G.nodes[node]["volume"] = trend_data["volume"]
+            G.nodes[node]["3mo_trend"] = trend_data["3mo_trend"]
+            G.nodes[node]["yoy"] = trend_data["yoy"]
+
     return G
 
 # ─── VISUALIZE ───────────────────────────────────────────
@@ -97,7 +128,10 @@ var options = {
 """)
     colors = {"seed": "#1f78b4", "subtopic": "#66c2a5", "related": "#61b2ff", "related_question": "#ffcc61"}
     for node, data in G.nodes(data=True):
-        net.add_node(node, label=data["label"], title=f"{data['rel']} (depth {data['depth']})", color=colors.get(data['rel'], "#999999"))
+        title = f"{data['rel']} (depth {data['depth']})"
+        if 'volume' in data:
+            title += f"<br>🔍 MSV: {data['volume']}<br>📈 YoY: {data['yoy']}%<br>📊 3mo Trend: {data['3mo_trend']}"
+        net.add_node(node, label=data["label"], title=title, color=colors.get(data["rel"], "#999999"))
     for u, v in G.edges():
         net.add_edge(u, v)
     return net.generate_html()
@@ -135,17 +169,22 @@ if st.sidebar.button("Generate Graph"):
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
 
-    # ─── EXPORT TO EXCEL ───────────────────────────────────
-    nodes_data = [{"Topic": data["label"], "Type": data["rel"], "Depth": data["depth"]} for _, data in G.nodes(data=True)]
+    # Export graph data to Excel
+    nodes_data = []
+    for _, data in G.nodes(data=True):
+        nodes_data.append({
+            "Topic": data["label"],
+            "Type": data["rel"],
+            "Depth": data["depth"],
+            "Search Volume": data.get("volume", ""),
+            "YoY Change (%)": data.get("yoy", ""),
+            "3mo Trend": data.get("3mo_trend", "")
+        })
     df = pd.DataFrame(nodes_data)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="Topics")
-    excel_data = output.getvalue()
-
+    csv_data = df.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Download Topics as Excel",
-        data=excel_data,
-        file_name=f"{seed.replace(' ', '_')}_knowledge_graph.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        label="📥 Download Topics as CSV",
+        data=csv_data,
+        file_name=f"{seed.replace(' ', '_')}_knowledge_graph.csv",
+        mime="text/csv"
     )
