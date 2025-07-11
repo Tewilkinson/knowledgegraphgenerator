@@ -1,184 +1,151 @@
 # app.py
 
 import streamlit as st
+import requests, re
+import networkx as nx
+import numpy as np
+from pyvis.network import Network
 from SPARQLWrapper import SPARQLWrapper, JSON
 from openai import OpenAI
-import numpy as np
-import networkx as nx
-from pyvis.network import Network
-import requests, re
 
-# ─── 1. CONFIG & CLIENTS ─────────────────────────────────
-openai_client     = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-WIKIDATA_SPARQL   = "https://query.wikidata.org/sparql"
-WIKIDATA_SEARCH   = "https://www.wikidata.org/w/api.php"
+# ─── 1. CONFIG ────────────────────────────────────────────
+openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+WIKIDATA_SEARCH = "https://www.wikidata.org/w/api.php"
 
-# ─── 2. UI CONTROLS ────────────────────────────────────────
+# ─── 2. UI ─────────────────────────────────────────────────
 st.set_page_config(layout="wide")
-st.title("🔎 Deep Interactive Wikidata Knowledge Graph")
+st.title("🔎 Deep Hybrid GPT + Wikidata Graph")
 
 with st.sidebar:
-    seed       = st.text_input("Seed entity", "data warehouse")
-    max_depth  = st.slider("Max crawl depth", 1, 5, 5)
-    gpt_topics = st.slider("GPT topics/node", 1, 30, 10)
+    seed       = st.text_input("Seed term", "data warehouse")
+    max_depth  = st.slider("Wikidata depth", 1, 5, 3)
     build      = st.button("Build Graph")
 
-# Inline legend
+# Legend
 st.markdown(
-    "<span style='display:inline-block;width:12px;height:12px;"
-    "background-color:#66c2a5;margin-right:6px;'></span>Wikidata&nbsp;&nbsp;"
-    "<span style='display:inline-block;width:12px;height:12px;"
-    "background-color:#fc8d62;margin-right:6px;'></span>GPT",
-    unsafe_allow_html=True
+    """
+    <span style="display:inline-block;
+                 width:12px;height:12px;
+                 background:#fc8d62;
+                 margin-right:6px;"></span>GPT
+    &nbsp;&nbsp;
+    <span style="display:inline-block;
+                 width:12px;height:12px;
+                 background:#66c2a5;
+                 margin-right:6px;"></span>Wikidata
+    """, unsafe_allow_html=True
 )
 
 # ─── 3. HELPERS ────────────────────────────────────────────
+def get_seed_related_queries(term: str, n: int=50) -> list[str]:
+    """One big GPT call for n related queries of the seed."""
+    prompt = (
+        f"Give me {n} concise, distinct search queries related to “{term}”. "
+        "Return them as a bullet list (no numbering)."
+    )
+    resp = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role":"system","content":"You are a helpful assistant."},
+            {"role":"user","content":prompt}
+        ],
+        temperature=0.7,
+    )
+    lines = resp.choices[0].message.content.splitlines()
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln: continue
+        clean = re.sub(r"^[-•\s]+","", ln)
+        out.append(clean)
+    return out
+
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    """
-    Try the wbsearchentities API, then fall back to a SPARQL label match.
-    """
-    # 3A) API call
+    """Simple Wikidata search→QID (we’ll only use it to recurse)."""
     try:
-        r = requests.get(
-            WIKIDATA_SEARCH,
-            params={
-                "action":"wbsearchentities",
-                "search":label,
-                "language":"en",
-                "format":"json",
-                "limit":1
-            },
-            timeout=5
-        )
-        r.raise_for_status()
-        hits = r.json().get("search", [])
-        if hits:
-            return hits[0]["id"]
-    except Exception:
-        pass
-
-    # 3B) SPARQL fallback on rdfs:label
-    try:
-        sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-        sparql.setQuery(f"""
-          PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-          SELECT ?item WHERE {{
-            ?item rdfs:label "{label}"@en .
-          }} LIMIT 1
-        """)
-        sparql.setReturnFormat(JSON)
-        res = sparql.query().convert()["results"]["bindings"]
-        if res:
-            return res[0]["item"]["value"].rsplit("/",1)[-1]
-    except Exception:
-        pass
-
-    return None
-
+        r = requests.get(WIKIDATA_SEARCH, params={
+            "action":"wbsearchentities",
+            "search": label,
+            "language":"en",
+            "format":"json",
+            "limit": 1
+        }, timeout=5).json()
+        return r.get("search", [{}])[0].get("id")
+    except:
+        return None
 
 @st.cache_data
-def fetch_wikidata_relations(qid: str, preds: list[str]) -> list[tuple[str,str,str]]:
+def fetch_wd(qid: str) -> list[tuple[str,str]]:
+    """Get (predicateLabel, objectLabel) for the 3 predicates."""
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    vals   = " ".join(f"wdt:{p}" for p in preds)
     sparql.setQuery(f"""
-      SELECT ?pLabel ?obj ?objLabel WHERE {{
-        VALUES ?p {{ {vals} }}
+      SELECT ?pLabel ?objLabel WHERE {{
+        VALUES ?p {{ wdt:P279 wdt:P31 wdt:P361 }}
         wd:{qid} ?p ?obj .
         SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
       }}
     """)
     sparql.setReturnFormat(JSON)
-    bindings = sparql.query().convert()["results"]["bindings"]
+    rows = sparql.query().convert()["results"]["bindings"]
     return [
-        (
-          b["pLabel"]["value"],
-          b["obj"]["value"].rsplit("/",1)[-1],
-          b["objLabel"]["value"]
-        )
-        for b in bindings
+      (r["pLabel"]["value"], r["objLabel"]["value"])
+      for r in rows
     ]
 
+# ─── 4. BUILD GRAPH ────────────────────────────────────────
+def build_graph(seed: str, max_depth: int):
+    G = nx.DiGraph()
 
-@st.cache_data
-def get_related_topics(label: str, n: int) -> list[str]:
-    prompt = (
-        f"List {n} DISTINCT, concise subtopics of “{label}” "
-        "as a bullet list. Return ONLY the subtopic names."
-    )
-    resp = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[
-          {"role":"system","content":"You are a helpful assistant."},
-          {"role":"user","content":prompt}
-        ],
-        temperature=0.7,
-    )
-    text = resp.choices[0].message.content
-    items = []
-    for line in text.splitlines():
-        clean = re.sub(r"^[-•\d\.\)\s]+","", line.strip())
-        if clean:
-            items.append(clean)
-    return items
+    # 4A) Seed node
+    G.add_node(seed, label=seed, source="seed", depth=0)
 
-# ─── 4. GRAPH EXPANSION ────────────────────────────────────
-def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
-    if G.has_node(qid):
-        return
+    # 4B) GPT level: one big call
+    related = get_seed_related_queries(seed, n=50)
+    for q in related:
+        G.add_node(q, label=q, source="gpt", depth=1)
+        G.add_edge(seed, q, predicate="related_query")
 
-    source = "wikidata" if qid.startswith("Q") else "gpt"
-    G.add_node(qid, label=label, depth=depth, source=source)
+    # 4C) Wikidata recursion under each GPT node
+    def recurse(label, depth):
+        if depth > max_depth:
+            return
+        qid = search_qid(label)
+        if not qid:
+            return
+        for pred, obj_lbl in fetch_wd(qid):
+            # node
+            G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+2)
+            # edge
+            G.add_edge(label, obj_lbl, predicate=pred)
+            recurse(obj_lbl, depth+1)
 
-    if depth >= max_depth:
-        return
+    for q in related:
+        recurse(q, depth=1)
 
-    # Wikidata edges
-    if source == "wikidata":
-        for prop, obj_q, obj_lbl in fetch_wikidata_relations(
-            qid, ["P279","P31","P361"]
-        ):
-            G.add_edge(qid, obj_q, predicate=prop)
-            expand_node(G, obj_q, obj_lbl, depth+1)
+    return G
 
-    # GPT “related_to” edges
-    for sub in get_related_topics(label, gpt_topics):
-        sub_q = search_qid(sub)
-        node_id = sub_q or f"GPT:{sub}"
-        G.add_edge(qid, node_id, predicate="related_to")
-        expand_node(G, node_id, sub, depth+1)
-
-# ─── 5. VISUALIZATION ─────────────────────────────────────
-def draw_pyvis(G: nx.DiGraph) -> str:
+# ─── 5. RENDER ─────────────────────────────────────────────
+def draw(G):
     net = Network(height="700px", width="100%", notebook=False)
-
-    for nid, data in G.nodes(data=True):
-        lbl    = data.get("label", nid)
-        src    = data.get("source", "wikidata")
-        color  = "#66c2a5" if src == "wikidata" else "#fc8d62"
-        title  = f"{lbl} (depth {data.get('depth', 0)})"
-        net.add_node(nid, label=lbl, title=title, color=color)
-
-    for u, v, d in G.edges(data=True):
-        net.add_edge(u, v, title=d.get("predicate",""))
-
+    for nid, d in G.nodes(data=True):
+        color = {
+            "seed":"#1f78b4",
+            "gpt":"#fc8d62",
+            "wikidata":"#66c2a5"
+        }[d["source"]]
+        net.add_node(nid, label=d["label"], title=f"{d['source']} depth={d['depth']}", color=color)
+    for u,v,d in G.edges(data=True):
+        net.add_edge(u,v,title=d["predicate"])
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
 # ─── 6. MAIN ───────────────────────────────────────────────
 if build:
-    with st.spinner("Resolving seed to QID…"):
-        root = search_qid(seed)
+    with st.spinner("Building hybrid graph…"):
+        G = build_graph(seed, max_depth)
 
-    if not root:
-        st.error(f"❌ No Wikidata match for “{seed}”.")
-        st.stop()
-
-    st.success(f"✅ Seed → QID {root}")
-    G = nx.DiGraph()
-    with st.spinner("Expanding graph… this may take a while"):
-        expand_node(G, root, seed, depth=0)
-
-    st.info(f"🚀 Graph built: {len(G.nodes)} nodes, {len(G.edges)} edges.")
-    html = draw_pyvis(G)
+    st.success(f"Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
+    html = draw(G)
     st.components.v1.html(html, height=750, scrolling=True)
