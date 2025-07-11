@@ -4,6 +4,8 @@ import networkx as nx
 from pyvis.network import Network
 from openai import OpenAI
 import json
+import pandas as pd
+import io
 
 # ─── CONFIG ────────────────────────────────────────────
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -18,7 +20,6 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
       - rel='related_question': user search questions
     Returns a list of strings.
     """
-    # Construct prompt based on relation
     if rel == "subtopic":
         prompt = (
             f"Provide a JSON array of up to {limit} concise, distinct subtopics "
@@ -50,7 +51,6 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
         arr = json.loads(content)
         return [str(item) for item in arr][:limit]
     except json.JSONDecodeError:
-        # Fallback to line parsing
         items = []
         for line in content.splitlines():
             clean = re.sub(r"^[-•\s]+", "", line).strip()
@@ -63,7 +63,7 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
     G = nx.Graph()
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # Subtopics (level 1 & optional level 2)
+    # Subtopics
     level1 = get_llm_neighbors(seed, "subtopic", max_sub)
     for topic in level1:
         G.add_node(topic, label=topic, rel="subtopic", depth=1)
@@ -81,7 +81,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
     for concept in related:
         G.add_node(concept, label=concept, rel="related", depth=1)
         G.add_edge(seed, concept)
-    # Second-level related
     for concept in related:
         subrel = get_llm_neighbors(concept, "related", sem_sub_lim)
         for sr in subrel:
@@ -145,4 +144,20 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    st.components.v1.html(html, height=800, scrolling=True) 
+    st.components.v1.html(html, height=800, scrolling=True)
+
+    # ─── EXPORT TO EXCEL ───────────────────────────────────
+    nodes_data = [{"Topic": data["label"], "Type": data["rel"], "Depth": data["depth"]} for _, data in G.nodes(data=True)]
+    df = pd.DataFrame(nodes_data)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name="Topics")
+        writer.save()
+    excel_data = output.getvalue()
+
+    st.download_button(
+        label="📥 Download Topics as Excel",
+        data=excel_data,
+        file_name=f"{seed.replace(' ', '_')}_knowledge_graph.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
