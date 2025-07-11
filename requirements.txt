@@ -4,4 +4,4 @@ networkx
 python-louvain
 pyvis
 SPARQLWrapper
-st-cytoscape
+streamlit-cytoscapejs
