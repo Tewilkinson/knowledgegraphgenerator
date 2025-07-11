@@ -6,3 +6,4 @@ pyvis
 SPARQLWrapper
 streamlit-cytoscapejs
 openai
+plotly
