@@ -137,8 +137,14 @@ if keyword:
         wikidata_entities.append(data_warehouse_entity)
     
     st.write(f"Found {len(wikidata_entities)} related entities from Wikidata:")
+    
     for entity in wikidata_entities:
-        st.write(f"- Name: {entity['labels']['en']}, Description: {entity.get('descriptions', {}).get('en', 'N/A')}")
+        # Safely access the labels and descriptions
+        label = entity.get('labels', {}).get('en', 'No label available')
+        description = entity.get('descriptions', {}).get('en', 'No description available')
+        
+        # Display entity information
+        st.write(f"- Name: {label}, Description: {description}")
     
     # Visualize the knowledge graph if data is found
     if google_entities or wikidata_entities:
