@@ -12,10 +12,9 @@ openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 
-# Define which predicates are nominally "hierarchy" vs "association"
 ONTOLOGY = {
-    "hierarchy_predicates": ["P279", "P31"],            # subclass, instance
-    "association_predicates": ["P361", "P527", "P921"]  # part-of, has part, main subject
+    "hierarchy_predicates": ["P279", "P31"],
+    "association_predicates": ["P361", "P527", "P921"]
 }
 
 # ─── 2. STREAMLIT UI ───────────────────────────────────────────────────────
@@ -31,7 +30,6 @@ with st.sidebar:
     gpt_rel    = st.slider("GPT on each related node", 2, 20, 5)
     build      = st.button("Build Graph")
 
-# Inline legend
 st.markdown("""
 🔵 Seed  
 🟢 Custom Hierarchy  
@@ -47,14 +45,11 @@ st.markdown("""
 def lookup_qid(label: str) -> str | None:
     try:
         r = requests.get(WIKIDATA_API, params={
-            "action":"wbsearchentities",
-            "format":"json",
-            "language":"en",
-            "search":label,
-            "limit":1
+            "action":"wbsearchentities","format":"json",
+            "language":"en","search":label,"limit":1
         }, timeout=5)
         r.raise_for_status()
-        hits = r.json().get("search",[])
+        hits = r.json().get("search", [])
         return hits[0]["id"] if hits else None
     except:
         return None
@@ -62,7 +57,7 @@ def lookup_qid(label: str) -> str | None:
 @st.cache_data
 def get_wikidata_relations(qid: str, preds: list[str]):
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    vals = " ".join(f"wdt:{p}" for p in preds)
+    vals    = " ".join(f"wdt:{p}" for p in preds)
     sparql.setQuery(f"""
       SELECT ?p ?pLabel ?objLabel WHERE {{
         VALUES ?p {{ {vals} }}
@@ -74,25 +69,21 @@ def get_wikidata_relations(qid: str, preds: list[str]):
     rows = sparql.query().convert()["results"]["bindings"]
     return [
         (
-            r["p"]["value"].split("/")[-1],
-            r["pLabel"]["value"],
-            r["objLabel"]["value"]
-        )
-        for r in rows
+          r["p"]["value"].split("/")[-1],
+          r["pLabel"]["value"],
+          r["objLabel"]["value"]
+        ) for r in rows
     ]
 
 @st.cache_data
 def get_conceptnet_related(term: str, limit: int=20):
-    uri = term.lower().replace(" ","_")
+    uri = term.lower().replace(" ", "_")
     r = requests.get(
         f"https://api.conceptnet.io/related/c/en/{uri}",
         params={"filter":"/c/en","limit":limit}, timeout=5
-    )
-    r.raise_for_status()
-    return [
-        e["@id"].split("/")[-1].replace("_"," ")
-        for e in r.json().get("related", [])
-    ]
+    ); r.raise_for_status()
+    return [ e["@id"].split("/")[-1].replace("_"," ")
+             for e in r.json().get("related", []) ]
 
 @st.cache_data
 def get_gpt_related(term: str, limit: int=10):
@@ -103,32 +94,31 @@ def get_gpt_related(term: str, limit: int=10):
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role":"system","content":"You are a helpful assistant."},
-            {"role":"user","content":prompt}
+          {"role":"system","content":"You are a helpful assistant."},
+          {"role":"user","content":prompt}
         ],
         temperature=0.7
     )
     out = []
     for ln in resp.choices[0].message.content.splitlines():
-        ln = ln.strip()
-        if not ln: continue
-        out.append(re.sub(r"^[-•\s]+","", ln))
+        clean = re.sub(r"^[-•\s]+","", ln.strip())
+        if clean: out.append(clean)
     return out
 
 @st.cache_data
 def classify_edge_with_gpt(parent: str, child: str) -> str:
     prompt = (
-        f"Given a domain concept **{parent}** and a candidate subtopic **{child}**,\n"
-        "should this be classified as a **subtopic** or merely **related**? "
-        "Answer exactly one word: subtopic or related."
+        f"Given **{parent}** and a candidate subtopic **{child}**, "
+        "is this a **subtopic** or merely **related**? "
+        "Answer one word: subtopic or related."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role":"system","content":"You are a precise classifier."},
-            {"role":"user","content":prompt}
+          {"role":"system","content":"You are a precise classifier."},
+          {"role":"user","content":prompt}
         ],
-        temperature=0.0,
+        temperature=0.0
     )
     ans = resp.choices[0].message.content.strip().lower()
     return "hierarchy" if "subtopic" in ans else "association"
@@ -137,35 +127,35 @@ def load_custom_hierarchy(csv_path="custom_hierarchy.csv"):
     edges = []
     if os.path.exists(csv_path):
         with open(csv_path, newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 2:
+            for row in csv.reader(f):
+                if len(row)>=2:
                     edges.append((row[0].strip(), row[1].strip()))
     return edges
 
 # ─── 4. BUILD GRAPH ───────────────────────────────────────────────────────
 def build_graph():
     G = nx.Graph()
-    custom_edges = load_custom_hierarchy()
+    custom = load_custom_hierarchy()
 
     # Seed
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # Custom hierarchy overrides
-    for parent, child in custom_edges:
-        if not G.has_node(parent):
-            G.add_node(parent, label=parent, rel="seed", depth=0)
-        G.add_node(child, label=child, rel="custom", depth=1)
-        G.add_edge(parent, child)
+    # Custom overrides
+    for p,c in custom:
+        if not G.has_node(p):
+            G.add_node(p, label=p, rel="seed", depth=0)
+        G.add_node(c, label=c, rel="custom", depth=1)
+        G.add_edge(p, c)
 
-    # Wikidata relations
+    # Wikidata
     qid = lookup_qid(seed)
     if qid:
         wrels = get_wikidata_relations(
             qid,
-            ONTOLOGY["hierarchy_predicates"] + ONTOLOGY["association_predicates"]
+            ONTOLOGY["hierarchy_predicates"]
+            + ONTOLOGY["association_predicates"]
         )
-        for prop, pred_lbl, obj_lbl in wrels:
+        for prop, _, obj_lbl in wrels:
             if prop in ONTOLOGY["hierarchy_predicates"]:
                 rtype = classify_edge_with_gpt(seed, obj_lbl)
             else:
@@ -173,24 +163,25 @@ def build_graph():
             G.add_node(obj_lbl, label=obj_lbl, rel=rtype, depth=1)
             G.add_edge(seed, obj_lbl)
 
-    # ConceptNet neighbours
+    # ConceptNet
     sems = get_conceptnet_related(seed, sem_lim)
     for lbl in sems:
         G.add_node(lbl, label=lbl, rel="related", depth=1)
         G.add_edge(seed, lbl)
 
     # GPT on seed
-    gpts = get_gpt_related(seed, gpt_seed)
-    for qry in gpts:
+    for qry in get_gpt_related(seed, gpt_seed):
         G.add_node(qry, label=qry, rel="gpt_seed", depth=1)
         G.add_edge(seed, qry)
 
-    # GPT on each related/association/custom node
-    for node, data in G.nodes(data=True):
-        if data["rel"] in ("related", "association", "custom"):
-            subs = get_gpt_related(node, gpt_rel)
-            for sub in subs:
-                G.add_node(sub, label=sub, rel="gpt_related", depth=data["depth"]+1)
+    # GPT on each related/association/custom
+    nodes_list = list(G.nodes())
+    for node in nodes_list:
+        data = G.nodes[node]
+        if data.get("rel") in ("related", "association", "custom"):
+            for sub in get_gpt_related(node, gpt_rel):
+                G.add_node(sub, label=sub, rel="gpt_related",
+                           depth=data.get("depth",0)+1)
                 G.add_edge(node, sub)
 
     return G
@@ -212,9 +203,9 @@ def draw_pyvis(G):
             nid,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
-            color=color_map.get(data["rel"], "#ccc")
+            color=color_map.get(data.get("rel"), "#ccc")
         )
-    for u, v in G.edges():
+    for u,v in G.edges():
         net.add_edge(u, v)
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
