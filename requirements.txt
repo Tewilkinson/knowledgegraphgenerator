@@ -5,3 +5,9 @@ matplotlib
 beautifulsoup4
 python-dotenv
 plotly
+streamlit
+requests
+SPARQLWrapper
+networkx
+pyvis
+python-louvain    # only if you’re doing community‐coloring
