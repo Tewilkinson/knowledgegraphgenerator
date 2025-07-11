@@ -7,22 +7,23 @@ import streamlit as st
 import networkx as nx
 import community as community_louvain  # pip install python-louvain
 from pyvis.network import Network  # pip install pyvis
-from openai import OpenAI
+import openai  # pip install openai
 
 # Page configuration and OpenAI client setup
 st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
-openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def extract_triples(concept: str, max_triples: int = 6):
-    # Build prompt without using triple-quoted f-strings to avoid quoting issues
+    # Build prompt without using triple-quoted f-strings
     prompt = (
         f"You’re a KG extractor. Given the concept \"{concept}\", "
         f"list up to {max_triples} related concepts as a JSON array of "
         "[subject, relation, object] triples. "
         "Use relations like \"subclass_of\" or \"related_to\"."
     )
-    resp = openai.chat.completions.create(
+    # Use OpenAI's ChatCompletion API
+    resp = openai.ChatCompletion.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}]
     )
