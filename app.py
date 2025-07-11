@@ -6,12 +6,35 @@ from openai import OpenAI
 import numpy as np
 import networkx as nx
 from pyvis.network import Network
+import requests
 
 # --- 1. CONFIG ---
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 
-# --- 2. FETCH RELATIONS FROM WIKIDATA ---
+# --- 2. QID RESOLUTION VIA WIKIDATA SEARCH API ---
+@st.cache_data(show_spinner=False)
+def search_qid(label: str) -> str | None:
+    """
+    Uses the Wikidata API to find the best‐matching QID for a given English label.
+    Returns e.g. "Q11707" or None if not found.
+    """
+    resp = requests.get(
+        "https://www.wikidata.org/w/api.php",
+        params={
+            "action": "wbsearchentities",
+            "search": label,
+            "language": "en",
+            "format": "json",
+            "limit": 1
+        }
+    ).json()
+    results = resp.get("search", [])
+    if results:
+        return results[0]["id"]
+    return None
+
+# --- 3. FETCH RELATIONS FROM WIKIDATA ---
 @st.cache_data(show_spinner=False)
 def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,str,str]]:
     """
@@ -27,23 +50,22 @@ def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,
     }}
     """)
     sparql.setReturnFormat(JSON)
-    results = sparql.query().convert()["results"]["bindings"]
+    bindings = sparql.query().convert()["results"]["bindings"]
     return [
-      (r["pLabel"]["value"],
-       r["obj"]["value"].split("/")[-1],
-       r["objLabel"]["value"])
-      for r in results
+        (
+            b["pLabel"]["value"],
+            b["obj"]["value"].rsplit("/", 1)[-1],
+            b["objLabel"]["value"]
+        )
+        for b in bindings
     ]
 
-# --- 3. GET EMBEDDINGS & SIMILARITY ---
+# --- 4. GET EMBEDDINGS & SIMILARITY ---
 @st.cache_data(show_spinner=False)
 def get_embedding(text: str) -> np.ndarray:
-    """
-    Calls the OpenAI v1 client to get a single embedding vector.
-    """
     resp = openai_client.embeddings.create(
-        model="text-embedding-3-small",   # or e.g. "text-embedding-ada-002"
-        input=[text]                      # note: list of strings
+        model="text-embedding-3-small",  # or "text-embedding-ada-002"
+        input=[text]
     )
     vec = resp.data[0].embedding
     return np.array(vec)
@@ -51,23 +73,19 @@ def get_embedding(text: str) -> np.ndarray:
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-# --- 4. BUILD/EXPAND GRAPH ---
+# --- 5. BUILD/EXPAND GRAPH ---
 def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int=0, max_depth: int=2):
-    """
-    Recursively adds nodes & edges from Wikidata + embeddings enrichment.
-    """
     if depth > max_depth or G.has_node(qid):
         return
     emb = get_embedding(label)
     G.add_node(qid, label=label, embedding=emb.tolist(), depth=depth)
 
-    # fetch Wikidata relations
     relations = fetch_wikidata_relations(qid, predicates=["P279","P31","P361"])
     for pred_label, obj_qid, obj_label in relations:
         G.add_edge(qid, obj_qid, predicate=pred_label)
         expand_node(G, obj_qid, obj_label, depth+1, max_depth)
 
-# --- 5. VISUALIZATION ---
+# --- 6. VISUALIZATION WITH PYVIS ---
 def draw_pyvis(G: nx.DiGraph) -> str:
     net = Network(height="600px", width="100%", notebook=False)
     for node_id, data in G.nodes(data=True):
@@ -77,32 +95,25 @@ def draw_pyvis(G: nx.DiGraph) -> str:
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
-# --- 6. STREAMLIT APP ---
+# --- 7. STREAMLIT APP ---
 st.set_page_config(layout="wide")
 st.title("🔎 Interactive Wikidata Knowledge Graph")
 
-# 6.1 Seed input & build trigger
-seed = st.text_input("Enter an entity name (e.g. ‘Data warehouse’)", value="Data warehouse")
+# 7.1 Inputs
+seed = st.text_input("Enter an entity name (e.g. ‘Data warehouse’)", value="data warehouse")
 max_depth = st.slider("Max crawl depth", 1, 4, 2)
+
 if st.button("🔍 Build Graph"):
-    # ----- Resolve seed → QID (simple SPARQL search) -----
-    sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    sparql.setQuery(f"""
-    SELECT ?item WHERE {{
-      ?item rdfs:label "{seed}"@en .
-    }} LIMIT 1
-    """)
-    sparql.setReturnFormat(JSON)
-    res = sparql.query().convert()["results"]["bindings"]
-    if not res:
-        st.error(f"No Wikidata item found for “{seed}”")
+    with st.spinner("Resolving QID…"):
+        qid = search_qid(seed)
+    if not qid:
+        st.error(f"No Wikidata item found for “{seed}” – please try a different term.")
     else:
-        qid = res[0]["item"]["value"].split("/")[-1]
+        st.success(f"Found QID: {qid}")
+        with st.spinner("Building graph…"):
+            G = nx.DiGraph()
+            expand_node(G, qid, seed, depth=0, max_depth=max_depth)
 
-        # ----- Build & expand graph -----
-        G = nx.DiGraph()
-        expand_node(G, qid, seed, depth=0, max_depth=max_depth)
-
-        # ----- Render -----
+        st.info(f"Graph built with {len(G.nodes)} nodes and {len(G.edges)} edges.")
         html = draw_pyvis(G)
         st.components.v1.html(html, height=700, scrolling=True)
