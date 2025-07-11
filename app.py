@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import networkx as nx
-from community import community_louvain   # pip install python-louvain
 import plotly.graph_objects as go
 
 # 1. LOOKUP: label → Wikidata QID
@@ -61,12 +60,12 @@ def build_graph(seed: str, depth: int, tax_limit: int, sem_limit: int) -> nx.Gra
     G = nx.Graph()
     G.add_node(qid, label=seed, type="seed")
 
-    # 1-hop taxonomy
+    # 1-hop taxonomy (fan-out)
     for cq, cl in get_subclasses(qid, tax_limit):
         G.add_node(cq, label=cl, type="taxonomy")
         G.add_edge(qid, cq, type="taxonomy")
 
-    # 1-hop semantic
+    # 1-hop semantic (related)
     for lbl, _ in get_conceptnet_neighbors(seed, sem_limit):
         nid = f"CN:{lbl}"
         G.add_node(nid, label=lbl, type="semantic")
@@ -91,7 +90,7 @@ st.markdown(
     Enter a **seed topic**, fetch both  
     • **fan-out** (Wikidata subclasses)  
     • **semantic** neighbours (ConceptNet)  
-    …and visualize them in colored, grouped clusters.
+    …and visualize them in two grouped clusters.
     """
 )
 
@@ -101,14 +100,24 @@ tax_lim = st.slider("Max subclasses (Wikidata P279)", 5, 50, 20)
 sem_lim = st.slider("Max related neighbours (ConceptNet)", 5, 50, 20)
 
 if st.button("Generate Graph"):
-    with st.spinner("Building and clustering…"):
-        G = build_graph(seed, depth, tax_lim, sem_lim)
-        partition = community_louvain.best_partition(G)
+    # build graph
+    G = build_graph(seed, depth, tax_lim, sem_lim)
 
-    # 6. LAYOUT + PLOTLY TRACES
-    pos = nx.spring_layout(G, seed=42, k=0.5)
+    # 6. ASSIGN CLUSTERS MANUALLY
+    clusters = {}
+    seed_lower = seed.lower()
+    for n, d in G.nodes(data=True):
+        label = d["label"].lower()
+        # everything that's seed, taxonomy, or contains the seed phrase → Core & Fan-Out
+        if d["type"] != "semantic" or seed_lower in label:
+            clusters[n] = "Core & Fan-Out"
+        else:
+            clusters[n] = "Related Topics"
 
-    # Edge trace
+    # 7. LAYOUT with NetworkX spring
+    pos = nx.spring_layout(G, seed=42, k=0.5, iterations=50)
+
+    # 8. BUILD EDGE TRACE
     edge_x, edge_y = [], []
     for u, v in G.edges():
         x0, y0 = pos[u]; x1, y1 = pos[v]
@@ -121,27 +130,28 @@ if st.button("Generate Graph"):
         hoverinfo="none"
     )
 
-    # Node traces, one per cluster
+    # 9. BUILD NODE TRACES, one per cluster
     node_traces = []
-    for cluster_id in set(partition.values()):
-        xs, ys, labels = [], [], []
+    for cluster_name in ["Core & Fan-Out", "Related Topics"]:
+        xs, ys, texts = [], [], []
         for n, d in G.nodes(data=True):
-            if partition[n] == cluster_id:
+            if clusters[n] == cluster_name:
                 x, y = pos[n]
-                xs.append(x); ys.append(y); labels.append(d["label"])
+                xs.append(x); ys.append(y)
+                texts.append(d["label"])
         node_traces.append(
             go.Scatter(
                 x=xs, y=ys,
                 mode="markers+text",
-                text=labels,
+                text=texts,
                 textposition="top center",
                 marker=dict(size=20),
-                name=f"Cluster {cluster_id}",
+                name=cluster_name,
                 hoverinfo="text"
             )
         )
 
-    # Assemble figure
+    # 10. ASSEMBLE AND DISPLAY
     fig = go.Figure(data=[edge_trace] + node_traces)
     fig.update_layout(
         showlegend=True,
