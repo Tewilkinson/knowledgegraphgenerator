@@ -32,12 +32,12 @@ def extract_triples(concept: str, max_triples: int = 6):
         "Use relations like \"subclass_of\" or \"related_to\"."
     )
     try:
-        resp = openai.ChatCompletion.create(
+        # Updated to use new OpenAI v1 API interface
+        resp = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
         text = resp.choices[0].message.content.strip()
-        # Attempt JSON parse
         return json.loads(text)
     except json.JSONDecodeError:
         st.error(f"API returned non-JSON response for '{concept}':\n{text}")
@@ -69,11 +69,9 @@ def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
 
 
 def detect_communities(G: nx.Graph):
-    # Use Louvain on the undirected graph for community detection
     if G.number_of_nodes() == 0:
         return {}
-    partition = community_louvain.best_partition(G.to_undirected())
-    return partition
+    return community_louvain.best_partition(G.to_undirected())
 
 
 def visualize_pyvis(G: nx.DiGraph, partition: dict):
@@ -96,7 +94,6 @@ def visualize_pyvis(G: nx.DiGraph, partition: dict):
 def main():
     st.title("🔍 Knowledge Graph Explorer")
 
-    # User inputs
     seed = st.text_input("Enter seed topic", value="Spatial data warehouse")
     depth = st.slider("Expansion depth", 1, 3, 2)
     max_triples = st.slider("Triples per node", 2, 8, 4)
