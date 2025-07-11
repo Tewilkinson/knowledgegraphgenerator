@@ -39,121 +39,117 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "You output only a JSON array of strings."},
+            {"role": "system", "content": "You are a helpful assistant that outputs only JSON arrays of strings."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.7
     )
+
     content = resp.choices[0].message.content
     try:
         arr = json.loads(content)
+        # ensure list of strings
         return [str(item) for item in arr][:limit]
     except json.JSONDecodeError:
-        items = []
-        for line in content.splitlines():
-            clean = re.sub(r"^[-•\s]+", "", line).strip()
+        # fallback: parse lines
+        out = []
+        for ln in content.splitlines():
+            clean = re.sub(r"^[-•\s]+", "", ln.strip())
             if clean:
-                items.append(clean)
-        return items[:limit]
+                out.append(clean)
+        return out[:limit]
 
 # ─── BUILD GRAPH ─────────────────────────────────────────
-def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q):
+def build_graph(seed, sub_depth, tax_lim, sem_lim, sem_sub_lim, rq_seed_lim):
     G = nx.Graph()
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # Subtopics (level 1 & optional level 2)
-    level1 = get_llm_neighbors(seed, "subtopic", max_sub)
-    for topic in level1:
-        G.add_node(topic, label=topic, rel="subtopic", depth=1)
-        G.add_edge(seed, topic)
+    # ChatGPT-derived subtopics
+    lvl1 = get_llm_neighbors(seed, "subtopic", tax_lim)
+    for clbl in lvl1:
+        G.add_node(clbl, label=clbl, rel="subtopic", depth=1)
+        G.add_edge(seed, clbl)
     if sub_depth > 1:
-        for topic in level1:
-            level2 = get_llm_neighbors(topic, "subtopic", max(1, max_sub // 2))
-            for sub2 in level2:
-                if not G.has_node(sub2):
-                    G.add_node(sub2, label=sub2, rel="subtopic", depth=2)
-                G.add_edge(topic, sub2)
+        for clbl in lvl1:
+            lvl2 = get_llm_neighbors(clbl, "subtopic", max(1, tax_lim // 2))
+            for c2lbl in lvl2:
+                if not G.has_node(c2lbl):
+                    G.add_node(c2lbl, label=c2lbl, rel="subtopic", depth=2)
+                G.add_edge(clbl, c2lbl)
 
-    # Related concepts
-    related = get_llm_neighbors(seed, "related", max_rel)
-    for concept in related:
-        G.add_node(concept, label=concept, rel="related", depth=1)
-        G.add_edge(seed, concept)
+    # ChatGPT-derived related concepts
+    sems = get_llm_neighbors(seed, "related", sem_lim)
+    for lbl in sems:
+        G.add_node(lbl, label=lbl, rel="related", depth=1)
+        G.add_edge(seed, lbl)
+
     # Second-level related
-    for concept in related:
-        subrel = get_llm_neighbors(concept, "related", sem_sub_lim)
-        for sr in subrel:
-            if not G.has_node(sr):
-                G.add_node(sr, label=sr, rel="related", depth=2)
-            G.add_edge(concept, sr)
+    for lbl in sems:
+        secs = get_llm_neighbors(lbl, "related", sem_sub_lim)
+        for sl in secs:
+            if not G.has_node(sl):
+                G.add_node(sl, label=sl, rel="related", depth=2)
+            G.add_edge(lbl, sl)
 
-    # Related questions
-    if include_q:
-        questions = get_llm_neighbors(seed, "related_question", max_q)
-        for q in questions:
-            G.add_node(q, label=q, rel="related_question", depth=1)
-            G.add_edge(seed, q)
+    # ChatGPT-derived related questions
+    rqs = get_llm_neighbors(seed, "related_question", rq_seed_lim)
+    for qry in rqs:
+        G.add_node(qry, label=qry, rel="related_question", depth=1)
+        G.add_edge(seed, qry)
+
     return G
 
 # ─── VISUALIZE ───────────────────────────────────────────
 def draw_pyvis(G: nx.Graph):
     net = Network(height="750px", width="100%", notebook=False)
     net.set_options("""
-var options = {
-  "interaction": {"hover": true, "navigationButtons": true},
-  "physics": {"enabled": true, "stabilization": {"iterations": 300}}
-}
-""")
-    # Uniform circle shapes, fixed size
-    props = {
-        "seed": {"color": "red"},
-        "subtopic": {"color": "#66c2a5"},
-        "related": {"color": "#61b2ff"},
-        "related_question": {"color": "#61b2ff"}
+    var options = {
+      "interaction": {"hover": true, "navigationButtons": true, "keyboard": true},
+      "physics": {"enabled": true, "stabilization": {"iterations": 500}}
     }
-    for node, data in G.nodes(data=True):
-        p = props.get(data["rel"], {"color": "#999999"})
+    """)
+
+    color_map = {
+        "seed": "#1f78b4",
+        "subtopic": "#66c2a5",
+        "related": "#61b2ff",
+        "related_question": "#ffcc61",
+    }
+    for nid, data in G.nodes(data=True):
         net.add_node(
-            node,
+            nid,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
-            color=p["color"],
-            shape="circle",
-            size=25
+            color=color_map.get(data["rel"], "#999999")
         )
     for u, v in G.edges():
         net.add_edge(u, v)
+
     return net.generate_html()
 
 # ─── STREAMLIT UI ────────────────────────────────────────
 st.set_page_config(layout="wide")
 st.title("🔗 LLM-driven Knowledge Graph Generator")
 
-# Sidebar
-with st.sidebar:
-    st.header("Controls")
-    seed = st.text_input("Seed topic", "data warehouse")
-    max_sub = st.slider("Max subtopics", 5, 50, 20)
-    max_rel = st.slider("Max related concepts", 5, 50, 20)
-    include_q = st.checkbox("Include related questions", value=True)
-    show_adv = st.checkbox("Show advanced settings")
-    if show_adv:
-        sub_depth = st.slider("Subtopic depth (levels)", 1, 2, 1)
-        max_q = st.slider("Number of questions", 5, 50, 20)
-        sem_sub_lim = st.slider("Max second-level related", 0, max_rel, max_rel // 2)
-    else:
-        sub_depth = 1
-        max_q = 20
-        sem_sub_lim = max_rel // 2
+# Sidebar controls
+st.sidebar.header("Controls")
+seed = st.sidebar.text_input("Seed topic", "data warehouse")
+sub_d = st.sidebar.slider("Subtopic depth", 1, 2, 1)
+tax_lim = st.sidebar.slider("Max subtopics", 5, 50, 20)
+sem_lim = st.sidebar.slider("Max related terms", 5, 50, 20)
+sem_sub_lim = st.sidebar.slider("Max sub-related terms", 0, 50, 10)
+rq_seed = st.sidebar.slider("Related Questions", 5, 50, 20)
 
 if st.sidebar.button("Generate Graph"):
     with st.spinner("Building graph…"):
-        G = build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q)
+        G = build_graph(seed, sub_d, tax_lim, sem_lim, sem_sub_lim, rq_seed)
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
+    # Legend
     st.markdown(
-        "<span style='color:red;'>🔴</span> Seed "
-        "<span style='color:#66c2a5;'>🔵</span> Subtopic  "
-        "<span style='color:#61b2ff;'>🔵</span> Related & Questions",
+        "<span style='color:#1f78b4;'>🔵</span>Seed  "
+        "<span style='color:#66c2a5;'>🟢</span>Subtopic  "
+        "<span style='color:#61b2ff;'>🔷</span>Related  "
+        "<span style='color:#ffcc61;'>🟠</span>Related Questions",
         unsafe_allow_html=True
     )
     html = draw_pyvis(G)
