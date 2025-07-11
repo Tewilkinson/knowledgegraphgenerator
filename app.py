@@ -34,63 +34,19 @@ def get_knowledge_graph_data(query):
         return data['itemListElement']
     return []
 
-# Fetch Wikidata data with relationships
-def get_related_entities_from_wikidata(keyword, num_results=50):
-    url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={keyword}&limit={num_results}&format=json"
-    response = requests.get(url)
-    entities = response.json().get('search', [])
-    
-    related_entities = []
-    for entity in entities:
-        entity_id = entity['id']
-        details_url = f"https://www.wikidata.org/w/api.php?action=wbgetentities&ids={entity_id}&format=json"
-        details_response = requests.get(details_url)
-        entity_details = details_response.json().get('entities', {}).get(entity_id, {})
-        
-        claims = entity_details.get('claims', {})
-        relationships = []
-        
-        if 'P31' in claims:  # Instance of (e.g., Human)
-            for claim in claims['P31']:
-                related_entity_id = claim['mainsnak']['datavalue']['value']['id']
-                relationships.append(('instance_of', related_entity_id))
-
-        if 'P69' in claims:  # Educated at (e.g., Princeton University)
-            for claim in claims['P69']:
-                related_entity_id = claim['mainsnak']['datavalue']['value']['id']
-                relationships.append(('educated_at', related_entity_id))
-        
-        related_entities.append({
-            'id': entity_id,
-            'label': entity['label'],
-            'description': entity.get('description', 'No description available'),
-            'relationships': relationships
-        })
-    
-    return related_entities
-
-# Fetch DBpedia data for related entities (semantic data)
-def get_related_entities_from_dbpedia(keyword):
-    url = f"http://dbpedia.org/sparql?query=SELECT%20%3Fsubject%20%3Fpredicate%20%3Fobject%20WHERE%20{{%20?subject%20?predicate%20?object%20FILTER%20(REGEX(str(?subject),%20'{keyword}'))%20}}&format=json"
+# Fetch Wikidata data with relationships by specific Q-codes
+def get_wikidata_entity_details(entity_id):
+    url = f"https://www.wikidata.org/w/api.php?action=wbgetentities&ids={entity_id}&format=json"
     response = requests.get(url)
     data = response.json()
     
-    related_entities = []
-    for result in data.get('results', {}).get('bindings', []):
-        subject = result.get('subject', {}).get('value')
-        predicate = result.get('predicate', {}).get('value')
-        object_ = result.get('object', {}).get('value')
-        
-        related_entities.append({
-            'subject': subject,
-            'predicate': predicate,
-            'object': object_
-        })
-    
-    return related_entities
+    if 'entities' in data:
+        entity = data['entities'][entity_id]
+        return entity
+    return None
 
-# Visualize the knowledge graph using Plotly
-def visualize_graph(google_entities, wikidata_entities, dbpedia_entities):
+# Function to visualize knowledge graph using Plotly
+def visualize_graph(google_entities, wikidata_entities):
     nodes = []
     edges = []
     
@@ -107,12 +63,6 @@ def visualize_graph(google_entities, wikidata_entities, dbpedia_entities):
                 (e['label'] for e in wikidata_entities if e['id'] == related_entity), None)
             if related_entity_label:
                 edges.append((entity['label'], related_entity_label))
-    
-    # Add DBpedia relationships as edges
-    for entity in dbpedia_entities:
-        subject = entity['subject']
-        object_ = entity['object']
-        edges.append((subject, object_))
     
     # Create node positions using a spring layout
     pos = {node: (i, j) for i, (node, j) in enumerate(zip(nodes, range(len(nodes))))}
@@ -172,27 +122,26 @@ if keyword:
     
     # Fetch related entities from Google Knowledge Graph
     google_entities = get_knowledge_graph_data(keyword)
+    st.write(f"Found {len(google_entities)} related entities from Google Knowledge Graph:")
+    if not google_entities:
+        st.write("No data returned from Google Knowledge Graph.")
     
-    # Fetch related entities from Wikidata
-    wikidata_entities = get_related_entities_from_wikidata(keyword)
+    # Fetch Wikidata data for "Data lake" and "Data warehouse" by their Q-codes
+    data_lake_entity = get_wikidata_entity_details('Q1234567')  # Replace with actual Q-code for "Data lake"
+    data_warehouse_entity = get_wikidata_entity_details('Q9876543')  # Replace with actual Q-code for "Data warehouse"
     
-    # Fetch related entities from DBpedia
-    dbpedia_entities = get_related_entities_from_dbpedia(keyword)
+    wikidata_entities = []
+    if data_lake_entity:
+        wikidata_entities.append(data_lake_entity)
+    if data_warehouse_entity:
+        wikidata_entities.append(data_warehouse_entity)
     
-    if google_entities or wikidata_entities or dbpedia_entities:
-        st.write(f"Found {len(google_entities)} related entities from Google Knowledge Graph:")
-        for entity in google_entities:
-            st.write(f"- Name: {entity['result']['name']}")
-        
-        st.write(f"Found {len(wikidata_entities)} related entities from Wikidata:")
-        for entity in wikidata_entities:
-            st.write(f"- Name: {entity['label']}, Description: {entity.get('description', 'N/A')}")
-        
-        st.write(f"Found {len(dbpedia_entities)} relationships from DBpedia:")
-        for entity in dbpedia_entities:
-            st.write(f"- {entity['subject']} {entity['predicate']} {entity['object']}")
-        
-        # Visualize the knowledge graph
-        visualize_graph(google_entities, wikidata_entities, dbpedia_entities)
+    st.write(f"Found {len(wikidata_entities)} related entities from Wikidata:")
+    for entity in wikidata_entities:
+        st.write(f"- Name: {entity['labels']['en']}, Description: {entity.get('descriptions', {}).get('en', 'N/A')}")
+    
+    # Visualize the knowledge graph if data is found
+    if google_entities or wikidata_entities:
+        visualize_graph(google_entities, wikidata_entities)
     else:
         st.write("No related entities found.")
