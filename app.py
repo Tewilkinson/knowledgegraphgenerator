@@ -1,8 +1,7 @@
 import streamlit as st
 import requests
 import os
-import networkx as nx
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -56,29 +55,75 @@ def get_related_entities_from_wikidata(keyword, num_results=50):
         })
     return related_entities
 
-# Function to visualize knowledge graph
+# Function to visualize knowledge graph using Plotly
 def visualize_graph(google_entities, wikidata_entities):
-    G = nx.Graph()
+    # Initialize lists to hold nodes and edges
+    nodes = []
+    edges = []
     
     # Add Google entities as nodes
     for entity in google_entities:
-        G.add_node(entity['title'], type='google')
+        nodes.append(entity['title'])
+        # Add edges to Google entities (if needed, based on relations)
+        for wikidata_entity in wikidata_entities:
+            if entity['title'].lower() == wikidata_entity['label'].lower():
+                edges.append((entity['title'], wikidata_entity['label']))
     
     # Add Wikidata entities as nodes
     for entity in wikidata_entities:
-        G.add_node(entity['label'], type='wikidata')
+        if entity['label'] not in nodes:
+            nodes.append(entity['label'])
     
-    # Add edges (for now, we add edges between Google and Wikidata entities with the same name)
-    for google_entity in google_entities:
-        for wikidata_entity in wikidata_entities:
-            if google_entity['title'].lower() == wikidata_entity['label'].lower():
-                G.add_edge(google_entity['title'], wikidata_entity['label'])
+    # Create a mapping for nodes
+    node_map = {node: i for i, node in enumerate(nodes)}
     
-    pos = nx.spring_layout(G)
-    nx.draw(G, pos, with_labels=True, node_size=2000, node_color='skyblue', font_size=10)
+    # Create edge list for Plotly visualization
+    edge_x = []
+    edge_y = []
+    for edge in edges:
+        x0, y0 = node_map[edge[0]], node_map[edge[1]]
+        edge_x.append(x0)
+        edge_y.append(y0)
     
-    # Show the plot in Streamlit
-    st.pyplot(plt)
+    # Create node positions using a spring layout (force-directed graph)
+    pos = {node: (i, j) for i, (node, j) in enumerate(zip(nodes, range(len(nodes))))}
+    node_x = [pos[node][0] for node in nodes]
+    node_y = [pos[node][1] for node in nodes]
+    
+    # Create Plotly graph
+    trace_nodes = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        text=nodes,
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            size=15,
+            color='skyblue',
+        ),
+        textposition='bottom center'
+    )
+
+    trace_edges = go.Scatter(
+        x=edge_x, y=edge_y,
+        mode='lines',
+        line=dict(width=1, color='gray'),
+        hoverinfo='none'
+    )
+
+    fig = go.Figure(data=[trace_edges, trace_nodes])
+
+    fig.update_layout(
+        title='Knowledge Graph Visualization',
+        showlegend=False,
+        hovermode='closest',
+        template='plotly_dark',
+        xaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(showgrid=False, zeroline=False)
+    )
+    
+    # Show the Plotly graph in Streamlit
+    st.plotly_chart(fig)
 
 # Streamlit interface
 st.title("Google Custom Search and Wikidata Knowledge Graph Visualization Tool")
