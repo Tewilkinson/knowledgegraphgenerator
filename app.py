@@ -1,11 +1,10 @@
 import streamlit as st
 import requests
 import networkx as nx
-from streamlit_cytoscapejs import st_cytoscape
+from community import community_louvain   # pip install python-louvain
+import plotly.graph_objects as go
 
-# ——————————————————————————————————————————————————————————————————————————————
 # 1. LOOKUP: label → Wikidata QID
-# ——————————————————————————————————————————————————————————————————————————————
 @st.cache_data(show_spinner=False)
 def lookup_qid(label: str) -> str:
     resp = requests.get(
@@ -20,83 +19,79 @@ def lookup_qid(label: str) -> str:
     resp.raise_for_status()
     return resp.json()["search"][0]["id"]
 
-# ——————————————————————————————————————————————————————————————————————————————
 # 2. TAXONOMY: direct subclasses (“fan-out”) via P279
-# ——————————————————————————————————————————————————————————————————————————————
 @st.cache_data(show_spinner=False)
 def get_subclasses(qid: str, limit: int = 20):
-    sparql_url = "https://query.wikidata.org/sparql"
-    query = f"""
+    sparql = f"""
     SELECT ?child ?childLabel WHERE {{
       ?child wdt:P279 wd:{qid} .
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
     }} LIMIT {limit}
     """
-    headers = {"Accept": "application/sparql-results+json"}
-    resp = requests.get(sparql_url, params={"query": query}, headers=headers)
+    resp = requests.get(
+        "https://query.wikidata.org/sparql",
+        params={"query": sparql},
+        headers={"Accept": "application/sparql-results+json"}
+    )
     resp.raise_for_status()
-    rows = resp.json()["results"]["bindings"]
+    bindings = resp.json()["results"]["bindings"]
     return [
-        (r["child"]["value"].rsplit("/", 1)[-1], r["childLabel"]["value"])
-        for r in rows
+        (b["child"]["value"].rsplit("/",1)[-1], b["childLabel"]["value"])
+        for b in bindings
     ]
 
-# ——————————————————————————————————————————————————————————————————————————————
 # 3. SEMANTIC: related neighbours from ConceptNet
-# ——————————————————————————————————————————————————————————————————————————————
 @st.cache_data(show_spinner=False)
 def get_conceptnet_neighbors(concept: str, limit: int = 20):
     uri = concept.lower().replace(" ", "_")
-    url = f"https://api.conceptnet.io/related/c/en/{uri}"
-    resp = requests.get(url, params={"filter": "/c/en", "limit": limit})
+    resp = requests.get(
+        f"https://api.conceptnet.io/related/c/en/{uri}",
+        params={"filter":"/c/en","limit":limit}
+    )
     resp.raise_for_status()
-    entries = resp.json().get("related", [])
+    rels = resp.json().get("related", [])
     return [
-        (e["@id"].split("/")[-1].replace("_", " "), e.get("weight", 0))
-        for e in entries
+        (e["@id"].split("/")[-1].replace("_"," "), e.get("weight",0))
+        for e in rels
     ]
 
-# ——————————————————————————————————————————————————————————————————————————————
 # 4. BUILD the hybrid graph
-# ——————————————————————————————————————————————————————————————————————————————
 def build_graph(seed: str, depth: int, tax_limit: int, sem_limit: int) -> nx.Graph:
-    seed_q = lookup_qid(seed)
+    qid = lookup_qid(seed)
     G = nx.Graph()
-    G.add_node(seed_q, label=seed, type="seed")
+    G.add_node(qid, label=seed, type="seed")
 
-    # 1-hop taxonomy (fan-out)
-    for cq, cl in get_subclasses(seed_q, tax_limit):
+    # 1-hop taxonomy
+    for cq, cl in get_subclasses(qid, tax_limit):
         G.add_node(cq, label=cl, type="taxonomy")
-        G.add_edge(seed_q, cq, type="taxonomy")
+        G.add_edge(qid, cq, type="taxonomy")
 
-    # 1-hop semantic (related)
+    # 1-hop semantic
     for lbl, _ in get_conceptnet_neighbors(seed, sem_limit):
-        node_id = f"CN:{lbl}"
-        G.add_node(node_id, label=lbl, type="semantic")
-        G.add_edge(seed_q, node_id, type="semantic")
+        nid = f"CN:{lbl}"
+        G.add_node(nid, label=lbl, type="semantic")
+        G.add_edge(qid, nid, type="semantic")
 
     # optional 2-hop taxonomy
     if depth > 1:
-        taxonomy_nodes = [n for n, d in G.nodes(data=True) if d["type"] == "taxonomy"]
-        for n in taxonomy_nodes:
-            for cq, cl in get_subclasses(n, tax_limit // 2):
-                if not G.has_node(cq):
-                    G.add_node(cq, label=cl, type="taxonomy")
-                G.add_edge(n, cq, type="taxonomy")
+        for n,d in list(G.nodes(data=True)):
+            if d["type"] == "taxonomy":
+                for cq, cl in get_subclasses(n, tax_limit//2):
+                    if not G.has_node(cq):
+                        G.add_node(cq, label=cl, type="taxonomy")
+                    G.add_edge(n, cq, type="taxonomy")
 
     return G
 
-# ——————————————————————————————————————————————————————————————————————————————
 # 5. STREAMLIT UI
-# ——————————————————————————————————————————————————————————————————————————————
 st.set_page_config(layout="wide")
-st.title("🔗 Grouped Knowledge-Graph Clusters")
+st.title("🔗 Hybrid Knowledge-Graph Content Clusters")
 st.markdown(
     """
     Enter a **seed topic**, fetch both  
     • **fan-out** (Wikidata subclasses)  
     • **semantic** neighbours (ConceptNet)  
-    …and display them in two grouped containers.
+    …and visualize them in colored, grouped clusters.
     """
 )
 
@@ -106,73 +101,53 @@ tax_lim = st.slider("Max subclasses (Wikidata P279)", 5, 50, 20)
 sem_lim = st.slider("Max related neighbours (ConceptNet)", 5, 50, 20)
 
 if st.button("Generate Graph"):
-    G = build_graph(seed, depth, tax_lim, sem_lim)
+    with st.spinner("Building and clustering…"):
+        G = build_graph(seed, depth, tax_lim, sem_lim)
+        partition = community_louvain.best_partition(G)
 
-    # build Cytoscape elements with two containers
-    elements = [
-        {
-            "data": {"id": "fanout", "label": "Fan-out Topics"},
-            "classes": "cluster"
-        },
-        {
-            "data": {"id": "semantic", "label": "Semantic Topics"},
-            "classes": "cluster"
-        }
-    ]
+    # 6. LAYOUT + PLOTLY TRACES
+    pos = nx.spring_layout(G, seed=42, k=0.5)
 
-    # assign each node to a container
-    for n, d in G.nodes(data=True):
-        parent = "fanout" if d["type"] in ("seed", "taxonomy") else "semantic"
-        elements.append({
-            "data": {"id": n, "label": d["label"], "parent": parent}
-        })
-
-    # add edges
+    # Edge trace
+    edge_x, edge_y = [], []
     for u, v in G.edges():
-        elements.append({"data": {"source": u, "target": v}})
-
-    # define styles
-    stylesheet = [
-        {
-            "selector": ".cluster",
-            "style": {
-                "shape": "roundrectangle",
-                "background-opacity": 0.1,
-                "label": "data(label)",
-                "text-valign": "top",
-                "text-halign": "center",
-                "padding": "10px",
-                "font-size": "16px"
-            }
-        },
-        {
-            "selector": "node",
-            "style": {
-                "label": "data(label)",
-                "text-wrap": "wrap",
-                "width": "label",
-                "height": "label",
-                "padding": "5px",
-                "font-size": "12px"
-            }
-        },
-        {
-            "selector": "edge",
-            "style": {
-                "curve-style": "bezier"
-            }
-        }
-    ]
-
-    # render with CytoscapeJS
-    st_cytoscape(
-        elements=elements,
-        stylesheet=stylesheet,
-        layout={
-            "name": "cose",
-            "idealEdgeLength": 100,
-            "nodeRepulsion": 300000
-        },
-        style={"width": "100%", "height": "650px"},
-        key="kg_graph"
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        mode="lines",
+        line=dict(width=1, color="#888"),
+        hoverinfo="none"
     )
+
+    # Node traces, one per cluster
+    node_traces = []
+    for cluster_id in set(partition.values()):
+        xs, ys, labels = [], [], []
+        for n, d in G.nodes(data=True):
+            if partition[n] == cluster_id:
+                x, y = pos[n]
+                xs.append(x); ys.append(y); labels.append(d["label"])
+        node_traces.append(
+            go.Scatter(
+                x=xs, y=ys,
+                mode="markers+text",
+                text=labels,
+                textposition="top center",
+                marker=dict(size=20),
+                name=f"Cluster {cluster_id}",
+                hoverinfo="text"
+            )
+        )
+
+    # Assemble figure
+    fig = go.Figure(data=[edge_trace] + node_traces)
+    fig.update_layout(
+        showlegend=True,
+        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
