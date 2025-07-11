@@ -138,7 +138,7 @@ var options = {
 
 # ─── STREAMLIT UI ────────────────────────────────────────
 st.set_page_config(layout="wide")
-st.title("🔗 LLM-driven Knowledge Graph Generator")
+st.title("LLM-driven Knowledge Graph Generator")
 
 with st.sidebar:
     st.header("Controls")
