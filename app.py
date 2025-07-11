@@ -104,21 +104,22 @@ var options = {
   "physics": {"enabled": true, "stabilization": {"iterations": 300}}
 }
 """)
-    # Uniform circle shapes, updated colors
+    # Uniform circle shapes, fixed size
     props = {
-        "seed": {"color": "red", "shape": "circle"},
-        "subtopic": {"color": "#66c2a5", "shape": "circle"},
-        "related": {"color": "#61b2ff", "shape": "circle"},
-        "related_question": {"color": "#61b2ff", "shape": "circle"}
+        "seed": {"color": "red"},
+        "subtopic": {"color": "#66c2a5"},
+        "related": {"color": "#61b2ff"},
+        "related_question": {"color": "#61b2ff"}
     }
     for node, data in G.nodes(data=True):
-        p = props.get(data["rel"], {"color": "#999999", "shape": "circle"})
+        p = props.get(data["rel"], {"color": "#999999"})
         net.add_node(
             node,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
             color=p["color"],
-            shape=p["shape"]
+            shape="circle",
+            size=25
         )
     for u, v in G.edges():
         net.add_edge(u, v)
