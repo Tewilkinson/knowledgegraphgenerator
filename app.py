@@ -69,11 +69,9 @@ def get_wikidata_relations(qid: str, preds: list[str]):
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
     return [
-        (
-          r["p"]["value"].split("/")[-1],
-          r["pLabel"]["value"],
-          r["objLabel"]["value"]
-        )
+        (r["p"]["value"].split("/")[-1],
+         r["pLabel"]["value"],
+         r["objLabel"]["value"])
         for r in rows
     ]
 
@@ -84,10 +82,8 @@ def get_conceptnet_related(term: str, limit: int=20):
         f"https://api.conceptnet.io/related/c/en/{uri}",
         params={"filter":"/c/en","limit":limit}, timeout=5
     ); r.raise_for_status()
-    return [
-        e["@id"].split("/")[-1].replace("_"," ")
-        for e in r.json().get("related", [])
-    ]
+    return [ e["@id"].split("/")[-1].replace("_"," ")
+             for e in r.json().get("related", []) ]
 
 @st.cache_data
 def get_gpt_related(term: str, limit: int=10):
@@ -180,8 +176,7 @@ def build_graph():
         G.add_edge(seed, qry)
 
     # GPT on each related/association/custom node
-    nodes_list = list(G.nodes())
-    for node in nodes_list:
+    for node in list(G.nodes()):
         data = G.nodes[node]
         if data.get("rel") in ("related", "association", "custom"):
             for sub in get_gpt_related(node, gpt_rel):
@@ -221,41 +216,33 @@ if build:
         G = build_graph()
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
 
-    # --- Export to Excel ---
-    nodes = [
-        {
-            "node_id": nid,
-            "label": data.get("label",""),
-            "rel": data.get("rel",""),
-            "depth": data.get("depth",0)
-        }
+    # --- Export nodes to CSV ---
+    df_nodes = pd.DataFrame([
+        {"node_id": nid, "label": data.get("label",""),
+         "rel": data.get("rel",""), "depth": data.get("depth",0)}
         for nid, data in G.nodes(data=True)
-    ]
-    df_nodes = pd.DataFrame(nodes)
-
-    edges = [
-        {
-            "source": u,
-            "target": v,
-            "predicate": ""
-        }
-        for u, v in G.edges()
-    ]
-    df_edges = pd.DataFrame(edges)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_nodes.to_excel(writer, sheet_name="nodes", index=False)
-        df_edges.to_excel(writer, sheet_name="edges", index=False)
-    output.seek(0)
-
+    ])
+    csv_nodes = df_nodes.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="💾 Download graph as Excel",
-        data=output,
-        file_name="knowledge_graph.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "💾 Download nodes CSV",
+        data=csv_nodes,
+        file_name="graph_nodes.csv",
+        mime="text/csv"
     )
-    # --- End export ---
 
+    # --- Export edges to CSV ---
+    df_edges = pd.DataFrame([
+        {"source": u, "target": v}
+        for u, v in G.edges()
+    ])
+    csv_edges = df_edges.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "💾 Download edges CSV",
+        data=csv_edges,
+        file_name="graph_edges.csv",
+        mime="text/csv"
+    )
+
+    # Render the graph
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
