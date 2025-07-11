@@ -145,4 +145,4 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    st.components.v1.html(html, height=800, scrolling=True) I want to be able to toggle the relqted items and related questions and subtopics so I can cleanly nav certain areas
+    st.components.v1.html(html, height=800, scrolling=True) 
