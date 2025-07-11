@@ -15,36 +15,35 @@ import networkx as nx
 import community as community_louvain  # pip install python-louvain
 from pyvis.network import Network  # pip install pyvis
 
-# Page configuration and OpenAI client setup
+# Page configuration
 st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def extract_triples(concept: str, max_triples: int = 6):
     """
-    Queries the OpenAI API for triples related to a concept and returns a JSON list of [subject, relation, object].
-    Handles non-JSON responses by surfacing the raw text.
+    Queries the OpenAI API for triples related to a concept and returns a list of [subject, relation, object].
     """
     prompt = (
-        f"You’re a KG extractor. Given the concept \"{concept}\", "
-        f"list up to {max_triples} related concepts as a JSON array of "
-        "[subject, relation, object] triples. "
-        "Use relations like \"subclass_of\" or \"related_to\"."
+        f"You are a knowledge graph extractor. Given the concept '{concept}', "
+        f"provide up to {max_triples} related concepts as a JSON array of "
+        "[subject, relation, object] triples. Use relations 'subclass_of' or 'related_to'."
     )
     try:
-        # Use the OpenAI v1+ interface via openai.chat.completions
+        # Use the v1+ OpenAI interface
         resp = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
         text = resp.choices[0].message.content.strip()
-        return json.loads(text)
+        triples = json.loads(text)
     except json.JSONDecodeError:
-        st.error(f"API returned non-JSON response for '{concept}':\n{text}")
+        st.error(f"Model returned non-JSON for '{concept}':\n{text}")
         return []
     except Exception as e:
         st.error(f"OpenAI API error for '{concept}': {e}")
         return []
+    return triples
 
 
 def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
@@ -52,19 +51,17 @@ def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
     seen = {seed}
     queue = deque([(seed, 0)])
     while queue:
-        node, d = queue.popleft()
-        if d >= depth:
+        node, level = queue.popleft()
+        if level >= depth:
             continue
         triples = extract_triples(node, max_triples)
-        if not triples:
-            continue
-        for s, rel, o in triples:
-            G.add_node(s)
-            G.add_node(o)
-            G.add_edge(s, o, relation=rel)
-            if o not in seen:
-                seen.add(o)
-                queue.append((o, d + 1))
+        for subject, relation, obj in triples:
+            G.add_node(subject)
+            G.add_node(obj)
+            G.add_edge(subject, obj, relation=relation)
+            if obj not in seen:
+                seen.add(obj)
+                queue.append((obj, level + 1))
     return G
 
 
@@ -74,40 +71,35 @@ def detect_communities(G: nx.Graph):
     return community_louvain.best_partition(G.to_undirected())
 
 
-def visualize_pyvis(G: nx.DiGraph, partition: dict):
+def visualize_graph(G: nx.DiGraph, partition: dict):
     net = Network(height="700px", width="100%", directed=True)
     for node in G.nodes():
         cid = partition.get(node, 0)
-        hue = (cid * 60) % 360
-        net.add_node(node, label=node, color=f"hsl({hue},70%,50%)")
+        color = f"hsl({(cid*60)%360},70%,50%)"
+        net.add_node(node, label=node, color=color)
     for u, v, data in G.edges(data=True):
-        rel = data.get("relation", "")
-        dashed = rel != "subclass_of"
-        net.add_edge(u, v, title=rel, dashes=dashed, arrowStrikethrough=False)
-
-    tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".html").name
-    net.show(tmpfile)
-    with open(tmpfile, "r", encoding="utf-8") as f:
-        return f.read()
+        style = {'dashes': data['relation']!='subclass_of'}
+        net.add_edge(u, v, title=data['relation'], **style)
+    path = tempfile.NamedTemporaryFile(delete=False, suffix=".html").name
+    net.show(path)
+    return open(path, 'r', encoding='utf-8').read()
 
 
 def main():
     st.title("🔍 Knowledge Graph Explorer")
+    seed = st.text_input("Seed topic", "Spatial data warehouse")
+    depth = st.slider("Depth", 1, 3, 2)
+    max_triples = st.slider("Triples/node", 1, 8, 4)
 
-    seed = st.text_input("Enter seed topic", value="Spatial data warehouse")
-    depth = st.slider("Expansion depth", 1, 3, 2)
-    max_triples = st.slider("Triples per node", 2, 8, 4)
-
-    if st.button("Build Graph"):
-        with st.spinner("⏳ Building knowledge graph…"):
+    if st.button("Generate Graph"):
+        with st.spinner("Building graph..."):
             G = build_graph(seed, depth, max_triples)
-            if G.number_of_nodes() == 0:
-                st.warning("No nodes found. Try a different seed or parameters.")
-            else:
-                partition = detect_communities(G)
-                html = visualize_pyvis(G, partition)
-                st.components.v1.html(html, height=700, scrolling=True)
-
+            if not G.nodes:
+                st.warning("No data; try a different seed or settings.")
+                return
+            partition = detect_communities(G)
+            html = visualize_graph(G, partition)
+            st.components.v1.html(html, height=700, scrolling=True)
 
 if __name__ == "__main__":
     main()
