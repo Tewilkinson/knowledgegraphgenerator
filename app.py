@@ -1,144 +1,196 @@
-# app.py
-
 import streamlit as st
-import requests, re
+import requests
 import networkx as nx
-from pyvis.network import Network
-from SPARQLWrapper import SPARQLWrapper, JSON
+import plotly.graph_objects as go
 from openai import OpenAI
 
-# ─── CONFIG ──────────────────────────────────────────────
-openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
-WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
-WD_PREDICATES   = ["P279","P31","P361","P527","P921"]
+# ──────────────────────────────────────────────────────────
+# 1. LOOKUP: label → Wikidata QID
+# ──────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def lookup_qid(label: str) -> str | None:
+    resp = requests.get(
+        "https://www.wikidata.org/w/api.php",
+        params={
+            "action": "wbsearchentities",
+            "format": "json",
+            "language": "en",
+            "search": label,
+            "limit": 1
+        },
+        timeout=5
+    )
+    resp.raise_for_status()
+    hits = resp.json().get("search", [])
+    return hits[0]["id"] if hits else None
 
-# ─── UI ───────────────────────────────────────────────────
-st.set_page_config(layout="wide")
-st.title("🔎 Hybrid GPT→Wikidata Knowledge Graph")
+# ──────────────────────────────────────────────────────────
+# 2. TAXONOMY: direct subclasses (“Subtopics”) via P279
+# ──────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def get_subclasses(qid: str, limit: int = 20):
+    sparql = f"""
+    SELECT ?child ?childLabel WHERE {{
+      ?child wdt:P279 wd:{qid} .
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+    }} LIMIT {limit}
+    """
+    r = requests.get(
+        "https://query.wikidata.org/sparql",
+        params={"query": sparql},
+        headers={"Accept": "application/sparql-results+json"},
+        timeout=10
+    )
+    r.raise_for_status()
+    rows = r.json()["results"]["bindings"]
+    return [
+        (row["child"]["value"].rsplit("/",1)[-1],
+         row["childLabel"]["value"])
+        for row in rows
+    ]
 
-with st.sidebar:
-    seed       = st.text_input("Seed term", "data warehouse")
-    gpt_count  = st.slider("GPT queries on seed", 5, 100, 50)
-    max_depth  = st.slider("Wikidata depth under GPT nodes", 1, 5, 3)
-    build      = st.button("Build Graph")
+# ──────────────────────────────────────────────────────────
+# 3. SEMANTIC: ConceptNet neighbours (“Related Entities”)
+# ──────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def get_conceptnet_neighbors(concept: str, limit: int = 20):
+    uri = concept.lower().replace(" ", "_")
+    r = requests.get(
+        f"https://api.conceptnet.io/related/c/en/{uri}",
+        params={"filter":"/c/en","limit":limit},
+        timeout=5
+    )
+    r.raise_for_status()
+    rels = r.json().get("related", [])
+    return [
+        (e["@id"].split("/")[-1].replace("_"," "), e.get("weight",0))
+        for e in rels
+    ]
 
-# legend
-st.markdown(
-    "<span style='color:#1f78b4;'>🔵</span>Seed  "
-    "<span style='color:#fc8d62;'>🟣</span>GPT  "
-    "<span style='color:#66c2a5;'>🟢</span>Wikidata",
-    unsafe_allow_html=True
-)
+# ──────────────────────────────────────────────────────────
+# 4. GPT: seed → “related queries”
+# ──────────────────────────────────────────────────────────
+openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# ─── HELPERS ─────────────────────────────────────────────
-def get_seed_related_queries(term: str, n: int) -> list[str]:
+@st.cache_data(show_spinner=False)
+def get_gpt_neighbors(seed: str, limit: int = 20):
     prompt = (
-        f"Give me {n} concise, distinct search queries related to “{term}”. "
-        "Return them as a bulleted list, one query per line."
+        f"List {limit} concise, distinct search queries related to “{seed}”. "
+        "Return them as a bulleted list with one per line, no numbering."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-          {"role":"system","content":"You are a helpful assistant."},
-          {"role":"user","content":prompt}
+            {"role":"system","content":"You are a helpful assistant."},
+            {"role":"user","content":prompt}
         ],
         temperature=0.7
     )
+    lines = resp.choices[0].message.content.splitlines()
     out = []
-    for ln in resp.choices[0].message.content.splitlines():
+    for ln in lines:
         ln = ln.strip()
         if not ln: continue
-        out.append(re.sub(r"^[-•\s]+", "", ln))
+        # strip bullets/dashes
+        clean = ln.lstrip("-• ").rstrip()
+        out.append(clean)
     return out
 
-@st.cache_data
-def search_qid(label: str) -> str | None:
-    try:
-        r = requests.get(WIKIDATA_API, params={
-            "action":"wbsearchentities",
-            "search":label,
-            "language":"en",
-            "format":"json",
-            "limit":1
-        }, timeout=5).json()
-        return r.get("search", [{}])[0].get("id")
-    except:
-        return None
+# ──────────────────────────────────────────────────────────
+# 5. BUILD the hybrid graph
+# ──────────────────────────────────────────────────────────
+def build_graph(seed: str,
+                depth: int,
+                tax_limit: int,
+                sem_limit: int,
+                gpt_limit: int) -> nx.Graph:
+    qid = lookup_qid(seed)
+    G = nx.Graph()
+    G.add_node(seed, label=seed, rel="seed")
 
-@st.cache_data
-def fetch_wikidata(qid: str) -> list[tuple[str,str]]:
-    sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    pred_vals = " ".join(f"wdt:{p}" for p in WD_PREDICATES)
-    sparql.setQuery(f"""
-      SELECT ?pLabel ?objLabel WHERE {{
-        VALUES ?p {{ {pred_vals} }}
-        wd:{qid} ?p ?obj .
-        SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-      }}
-    """)
-    sparql.setReturnFormat(JSON)
-    rows = sparql.query().convert()["results"]["bindings"]
-    return [(r["pLabel"]["value"], r["objLabel"]["value"]) for r in rows]
+    # 1-hop Subtopics (Wikidata P279)
+    if qid:
+        for child_q, child_lbl in get_subclasses(qid, tax_limit):
+            G.add_node(child_q, label=child_lbl, rel="subtopic")
+            G.add_edge(seed, child_q)
 
-# ─── BUILD GRAPH ──────────────────────────────────────────
-def build_graph(seed, gpt_count, max_depth):
-    G = nx.DiGraph()
-    # A) seed node
-    G.add_node(seed, label=seed, source="seed", depth=0)
+    # 2-hop Subtopics
+    if depth > 1 and qid:
+        first = [n for n,d in G.nodes(data=True) if d["rel"]=="subtopic"]
+        for n in first:
+            for cq, cl in get_subclasses(n, max(tax_limit//2,1)):
+                if not G.has_node(cq):
+                    G.add_node(cq, label=cl, rel="subtopic")
+                G.add_edge(n, cq)
 
-    # B) seed’s immediate Wikidata neighbors (no recursion)
-    seed_qid = search_qid(seed)
-    if seed_qid:
-        for pred, obj_lbl in fetch_wikidata(seed_qid):
-            G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=1)
-            G.add_edge(seed, obj_lbl, predicate=pred)
+    # 1-hop Related Entities (ConceptNet)
+    for lbl, _ in get_conceptnet_neighbors(seed, sem_limit):
+        nid = f"CN:{lbl}"
+        G.add_node(nid, label=lbl, rel="related")
+        G.add_edge(seed, nid)
 
-    # C) GPT cloud around the seed
-    gpt_nodes = get_seed_related_queries(seed, gpt_count)
-    for q in gpt_nodes:
-        G.add_node(q, label=q, source="gpt", depth=1)
-        G.add_edge(seed, q, predicate="related_query")
-
-    # D) recursion ONLY on GPT nodes (not on the seed’s WD neighbors)
-    def recurse_wikidata(label, depth):
-        if depth >= max_depth:
-            return
-        qid = search_qid(label)
-        if not qid:
-            return
-        for pred, obj_lbl in fetch_wikidata(qid):
-            if not G.has_node(obj_lbl):
-                G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+2)
-            G.add_edge(label, obj_lbl, predicate=pred)
-            recurse_wikidata(obj_lbl, depth+1)
-
-    for q in gpt_nodes:
-        recurse_wikidata(q, depth=1)
+    # 1-hop GPT queries
+    for qry in get_gpt_neighbors(seed, gpt_limit):
+        nid = f"GPT:{qry}"
+        G.add_node(nid, label=qry, rel="gpt")
+        G.add_edge(seed, nid)
 
     return G
 
-# ─── RENDER ───────────────────────────────────────────────
-def draw_pyvis(G):
-    net = Network(height="700px", width="100%", notebook=False)
-    for nid, data in G.nodes(data=True):
-        color = {
-            "seed":"#1f78b4",
-            "gpt":"#fc8d62",
-            "wikidata":"#66c2a5"
-        }[data["source"]]
-        net.add_node(nid,
-                     label=data["label"],
-                     title=f"{data['source']} depth={data['depth']}",
-                     color=color)
-    for u,v,d in G.edges(data=True):
-        net.add_edge(u, v, title=d.get("predicate",""))
-    net.show_buttons(filter_=['physics'])
-    return net.generate_html()
+# ──────────────────────────────────────────────────────────
+# 6. STREAMLIT UI
+# ──────────────────────────────────────────────────────────
+st.set_page_config(layout="wide")
+st.title("🔗 Hybrid: Wikidata P279 + ConceptNet + GPT")
 
-# ─── MAIN ─────────────────────────────────────────────────
-if build:
-    with st.spinner("Building hybrid graph…"):
-        G = build_graph(seed, gpt_count, max_depth)
-    st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
-    st.components.v1.html(draw_pyvis(G), height=750, scrolling=True)
+seed    = st.text_input("Seed topic", "data warehouse")
+depth   = st.slider("Subtopic depth",          1, 3, 1)
+tax_lim = st.slider("Max subtopics (P279)",    5, 50, 20)
+sem_lim = st.slider("Max ConceptNet items",    5, 50, 20)
+gpt_lim = st.slider("Max GPT queries",         5, 50, 20)
+
+if st.button("Generate Graph"):
+    G   = build_graph(seed, depth, tax_lim, sem_lim, gpt_lim)
+    pos = nx.spring_layout(G, seed=42, k=0.5, iterations=50)
+
+    # edges
+    ex, ey = [], []
+    for u,v in G.edges():
+        x0,y0 = pos[u]; x1,y1 = pos[v]
+        ex += [x0,x1,None]; ey += [y0,y1,None]
+
+    edge_trace = go.Scatter(
+        x=ex, y=ey, mode="lines",
+        line=dict(color="#888",width=1), hoverinfo="none"
+    )
+
+    # nodes by type
+    traces = []
+    color_map = {
+        "seed":    "#ff6961",
+        "subtopic":"#61ff8e",
+        "related": "#61b2ff",
+        "gpt":     "#ffcc61"
+    }
+    for rel_type, color in color_map.items():
+        xs, ys, txt = [], [], []
+        for n,d in G.nodes(data=True):
+            if d["rel"] == rel_type:
+                x,y = pos[n]
+                xs.append(x); ys.append(y); txt.append(d["label"])
+        traces.append(
+            go.Scatter(
+                x=xs, y=ys, mode="markers+text",
+                text=txt, textposition="top center",
+                marker=dict(size=18, color=color),
+                name=rel_type.capitalize(), hoverinfo="text"
+            )
+        )
+
+    fig = go.Figure(data=[edge_trace] + traces)
+    fig.update_layout(
+        showlegend=True, margin=dict(l=20,r=20,t=40,b=20),
+        xaxis=dict(showgrid=False,zeroline=False,showticklabels=False),
+        yaxis=dict(showgrid=False,zeroline=False,showticklabels=False)
+    )
+    st.plotly_chart(fig, use_container_width=True)
