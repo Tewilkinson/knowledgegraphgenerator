@@ -147,4 +147,52 @@ def visualize_graph(google_entities, wikidata_entities, dbpedia_entities):
         hoverinfo='none'
     )
 
-    fig = go.Figure(dat
+    fig = go.Figure(data=[trace_edges, trace_nodes])
+
+    fig.update_layout(
+        title='Comprehensive Knowledge Graph Visualization',
+        showlegend=False,
+        hovermode='closest',
+        template='plotly_dark',
+        xaxis=dict(showgrid=False, zeroline=False),
+        yaxis=dict(showgrid=False, zeroline=False)
+    )
+    
+    # Show the Plotly graph in Streamlit
+    st.plotly_chart(fig)
+
+# Streamlit interface
+st.title("Comprehensive Knowledge Graph Visualization Tool")
+
+# Input for entity or keyword
+keyword = st.text_input("Enter an entity or keyword:")
+
+if keyword:
+    st.write(f"Fetching related entities for: {keyword}")
+    
+    # Fetch related entities from Google Knowledge Graph
+    google_entities = get_knowledge_graph_data(keyword)
+    
+    # Fetch related entities from Wikidata
+    wikidata_entities = get_related_entities_from_wikidata(keyword)
+    
+    # Fetch related entities from DBpedia
+    dbpedia_entities = get_related_entities_from_dbpedia(keyword)
+    
+    if google_entities or wikidata_entities or dbpedia_entities:
+        st.write(f"Found {len(google_entities)} related entities from Google Knowledge Graph:")
+        for entity in google_entities:
+            st.write(f"- Name: {entity['result']['name']}")
+        
+        st.write(f"Found {len(wikidata_entities)} related entities from Wikidata:")
+        for entity in wikidata_entities:
+            st.write(f"- Name: {entity['label']}, Description: {entity.get('description', 'N/A')}")
+        
+        st.write(f"Found {len(dbpedia_entities)} relationships from DBpedia:")
+        for entity in dbpedia_entities:
+            st.write(f"- {entity['subject']} {entity['predicate']} {entity['object']}")
+        
+        # Visualize the knowledge graph
+        visualize_graph(google_entities, wikidata_entities, dbpedia_entities)
+    else:
+        st.write("No related entities found.")
