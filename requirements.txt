@@ -11,3 +11,4 @@ SPARQLWrapper
 networkx
 pyvis
 python-louvain    # only if you’re doing community‐coloring
+streamlit-cytoscape
