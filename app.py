@@ -104,10 +104,10 @@ var options = {
   "physics": {"enabled": true, "stabilization": {"iterations": 300}}
 }
 """)
-    # Updated colors and shapes
+    # Uniform circle shapes, updated colors
     props = {
         "seed": {"color": "red", "shape": "circle"},
-        "subtopic": {"color": "#66c2a5", "shape": "diamond"},
+        "subtopic": {"color": "#66c2a5", "shape": "circle"},
         "related": {"color": "#61b2ff", "shape": "circle"},
         "related_question": {"color": "#61b2ff", "shape": "circle"}
     }
@@ -150,9 +150,10 @@ if st.sidebar.button("Generate Graph"):
         G = build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q)
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
     st.markdown(
-        "<span style='color:red;'>🔴</span>Seed  "
-        "<span style='color:#66c2a5;'>🟢</span>Subtopic  "
-        "<span style='color:#61b2ff;'>🔵</span>Related & Questions", unsafe_allow_html=True
+        "<span style='color:red;'>🔴</span> Seed "
+        "<span style='color:#66c2a5;'>🔵</span> Subtopic  "
+        "<span style='color:#61b2ff;'>🔵</span> Related & Questions",
+        unsafe_allow_html=True
     )
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
