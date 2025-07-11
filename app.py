@@ -21,10 +21,7 @@ with st.sidebar:
     seed            = st.text_input("Seed entity", "data warehouse")
     max_depth       = st.slider("Max crawl depth", 1, 5, 3)
     gpt_topics      = st.slider("GPT topics/node", 1, 30, 8)
-    if st.button("Build Graph"):
-        build = True
-    else:
-        build = False
+    build           = st.button("Build Graph")
 
 # Inline legend
 st.markdown(
@@ -38,15 +35,29 @@ st.markdown(
 # ─── 3. HELPERS ────────────────────────────────────────────
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    r = requests.get(WIKIDATA_SEARCH, params={
-        "action":"wbsearchentities",
-        "search": label,
-        "language":"en",
-        "format":"json",
-        "limit": 1
-    }).json()
-    hits = r.get("search", [])
-    return hits[0]["id"] if hits else None
+    """
+    Lookup label via Wikidata search API.
+    Returns QID or None on error / no hit.
+    """
+    try:
+        resp = requests.get(
+            WIKIDATA_SEARCH,
+            params={
+                "action": "wbsearchentities",
+                "search": label,
+                "language": "en",
+                "format": "json",
+                "limit": 1
+            },
+            timeout=5
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get("search", [])
+        return hits[0]["id"] if hits else None
+    except (requests.RequestException, ValueError):
+        # network error, bad JSON, etc.
+        return None
 
 @st.cache_data
 def fetch_wikidata_relations(qid: str, preds: list[str]):
@@ -95,27 +106,20 @@ def get_related_topics(label: str, n: int):
 
 # ─── 4. GRAPH EXPANSION ────────────────────────────────────
 def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
-    """
-    Adds node(qid,label,depth,source) then recurses:
-      - Wikidata (P279,P31,P361) if qid startswith 'Q'
-      - GPT related_to for every node
-    """
-    # 1) If we've already added this exact qid, just update depth/label if missing
+    # If node exists, ensure label/depth are set
     if G.has_node(qid):
         meta = G.nodes[qid]
         meta.setdefault("label", label)
         meta.setdefault("depth", depth)
         return
 
-    # 2) Classify source
     source = "wikidata" if qid.startswith("Q") else "gpt"
     G.add_node(qid, label=label, depth=depth, source=source)
 
-    # 3) Stop at max depth
     if depth >= max_depth:
         return
 
-    # 4) Wikidata relations
+    # Wikidata relations
     if source == "wikidata":
         for pred, obj_id, obj_lbl in fetch_wikidata_relations(
             qid, ["P279","P31","P361"]
@@ -123,9 +127,9 @@ def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
             G.add_edge(qid, obj_id, predicate=pred)
             expand_node(G, obj_id, obj_lbl, depth+1)
 
-    # 5) GPT subtopics
+    # GPT subtopics
     for sub in get_related_topics(label, gpt_topics):
-        sub_qid = search_qid(sub)  # maybe None
+        sub_qid = search_qid(sub)
         node_id = sub_qid or f"GPT:{sub}"
         G.add_edge(qid, node_id, predicate="related_to")
         expand_node(G, node_id, sub, depth+1)
@@ -133,18 +137,13 @@ def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
 # ─── 5. VISUALIZATION ─────────────────────────────────────
 def draw_pyvis(G: nx.DiGraph) -> str:
     net = Network(height="700px", width="100%", notebook=False)
-
-    # Add every node with its human label & color by source
     for nid, data in G.nodes(data=True):
-        lbl    = data.get("label", nid)
-        color  = "#66c2a5" if data.get("source")=="wikidata" else "#fc8d62"
-        title  = f"{lbl} (depth {data.get('depth')})"
+        lbl   = data.get("label", nid)
+        color = "#66c2a5" if data.get("source")=="wikidata" else "#fc8d62"
+        title = f"{lbl} (depth {data.get('depth')})"
         net.add_node(nid, label=lbl, title=title, color=color)
-
-    # Add edges
     for u,v,data in G.edges(data=True):
         net.add_edge(u, v, title=data.get("predicate",""))
-
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
