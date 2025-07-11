@@ -1,14 +1,7 @@
 streamlit
 requests
 networkx
-matplotlib
-beautifulsoup4
-python-dotenv
-plotly
-streamlit
-requests
-SPARQLWrapper
-networkx
+python-louvain
 pyvis
-python-louvain    # only if you’re doing community‐coloring
-streamlit-cytoscape
+SPARQLWrapper
+st-cytoscape       # ← add this instead of “streamlit-cytoscape”
