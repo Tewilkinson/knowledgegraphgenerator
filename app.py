@@ -14,8 +14,8 @@ WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 
 ONTOLOGY = {
-    "hierarchy_predicates": ["P279", "P31"],
-    "association_predicates": ["P361", "P527", "P921"]
+    "hierarchy_predicates":   ["P279", "P31"],       # subclass, instance
+    "association_predicates": ["P361", "P527", "P921"]  # part-of, has-part, main-subject
 }
 
 # ─── 2. STREAMLIT UI ───────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ st.markdown("""
 🔵 Seed  
 🟢 Custom Hierarchy  
 🟡 Wikidata Hierarchy  
-🟣 Wikidata Association  
+🟣 Wikidata Association (treated as “related”)  
 🔷 ConceptNet  
 🟠 GPT (seed)  
 🟣 GPT (related)
@@ -69,9 +69,11 @@ def get_wikidata_relations(qid: str, preds: list[str]):
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
     return [
-        (r["p"]["value"].split("/")[-1],
-         r["pLabel"]["value"],
-         r["objLabel"]["value"])
+        (
+          r["p"]["value"].split("/")[-1],
+          r["pLabel"]["value"],
+          r["objLabel"]["value"]
+        )
         for r in rows
     ]
 
@@ -81,7 +83,8 @@ def get_conceptnet_related(term: str, limit: int=20):
     r = requests.get(
         f"https://api.conceptnet.io/related/c/en/{uri}",
         params={"filter":"/c/en","limit":limit}, timeout=5
-    ); r.raise_for_status()
+    )
+    r.raise_for_status()
     return [
         e["@id"].split("/")[-1].replace("_"," ")
         for e in r.json().get("related", [])
@@ -112,7 +115,7 @@ def classify_edge_with_gpt(parent: str, child: str) -> str:
     prompt = (
         f"Given a domain concept **{parent}** and a candidate subtopic **{child}**, "
         "should this be classified as a subtopic or merely related? "
-        "Answer one word: subtopic or related."
+        "Answer exactly one word: subtopic or related."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
@@ -123,7 +126,7 @@ def classify_edge_with_gpt(parent: str, child: str) -> str:
         temperature=0.0,
     )
     ans = resp.choices[0].message.content.strip().lower()
-    return "hierarchy" if "subtopic" in ans else "association"
+    return "hierarchy" if "subtopic" in ans else "related"
 
 def load_custom_hierarchy(csv_path="custom_hierarchy.csv"):
     edges = []
@@ -149,24 +152,24 @@ def build_graph():
         G.add_node(child, label=child, rel="custom", depth=1)
         G.add_edge(parent, child)
 
-    # Wikidata relations
+    # Wikidata relations (hierarchy vs related)
     qid = lookup_qid(seed)
     if qid:
         wrels = get_wikidata_relations(
             qid,
-            ONTOLOGY["hierarchy_predicates"] 
+            ONTOLOGY["hierarchy_predicates"]
             + ONTOLOGY["association_predicates"]
         )
         for prop, _, obj_lbl in wrels:
-            rtype = (classify_edge_with_gpt(seed, obj_lbl)
-                     if prop in ONTOLOGY["hierarchy_predicates"]
-                     else "association")
+            if prop in ONTOLOGY["hierarchy_predicates"]:
+                rtype = classify_edge_with_gpt(seed, obj_lbl)
+            else:
+                rtype = "related"
             G.add_node(obj_lbl, label=obj_lbl, rel=rtype, depth=1)
             G.add_edge(seed, obj_lbl)
 
     # ConceptNet neighbours
-    sems = get_conceptnet_related(seed, sem_lim)
-    for lbl in sems:
+    for lbl in get_conceptnet_related(seed, sem_lim):
         G.add_node(lbl, label=lbl, rel="related", depth=1)
         G.add_edge(seed, lbl)
 
@@ -193,8 +196,8 @@ def draw_pyvis(G):
         "seed":        "#1f78b4",
         "custom":      "#2ca02c",
         "hierarchy":   "#ff7f0e",
+        "related":     "#9467bd",
         "association": "#9467bd",
-        "related":     "#1f77b4",
         "gpt_seed":    "#d62728",
         "gpt_related": "#e377c2"
     }
@@ -203,7 +206,7 @@ def draw_pyvis(G):
             nid,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
-            color=color_map.get(data["rel"], "#ccc")
+            color=color_map.get(data.get("rel"), "#ccc")
         )
     for u, v in G.edges():
         net.add_edge(u, v)
@@ -216,7 +219,7 @@ if build:
         G = build_graph()
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
 
-    # Prepare nodes and edges DataFrames
+    # Prepare DataFrames
     df_nodes = pd.DataFrame([
         {"node_id": nid, "label": data["label"],
          "rel": data["rel"], "depth": data["depth"]}
@@ -227,7 +230,7 @@ if build:
         for u, v in G.edges()
     ])
 
-    # Create a single ZIP in memory
+    # Single ZIP download
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zf:
         zf.writestr("nodes.csv", df_nodes.to_csv(index=False))
@@ -241,6 +244,6 @@ if build:
         mime="application/zip"
     )
 
-    # Render the graph
+    # Render
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
