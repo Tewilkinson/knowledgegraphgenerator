@@ -5,3 +5,4 @@ python-louvain
 pyvis
 SPARQLWrapper
 streamlit-cytoscapejs
+openai
