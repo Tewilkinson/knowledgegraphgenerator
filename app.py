@@ -4,10 +4,16 @@ import tempfile
 from collections import deque
 
 import streamlit as st
+# Ensure OpenAI client is installed
+try:
+    import openai
+except ImportError:
+    st.error("The 'openai' package is not installed. Please add 'openai' to your requirements.txt or run 'pip install openai'.")
+    st.stop()
+
 import networkx as nx
 import community as community_louvain  # pip install python-louvain
 from pyvis.network import Network  # pip install pyvis
-import openai  # pip install openai
 
 # Page configuration and OpenAI client setup
 st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
