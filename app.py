@@ -7,30 +7,23 @@ from pyvis.network import Network
 from SPARQLWrapper import SPARQLWrapper, JSON
 from openai import OpenAI
 
-# ─── 1. CONFIG ────────────────────────────────────────────
+# ─── CONFIG ──────────────────────────────────────────────
 openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
+WD_PREDICATES   = ["P279","P31","P361","P527","P921"]
 
-# Which predicates to fetch on every Wikidata node:
-WD_PREDICATES = ["P279",  # subclass of
-                 "P31",   # instance of
-                 "P361",  # part of
-                 "P527",  # has part
-                 "P921"   # main subject
-                ]
-
-# ─── 2. UI ─────────────────────────────────────────────────
+# ─── UI ───────────────────────────────────────────────────
 st.set_page_config(layout="wide")
 st.title("🔎 Hybrid GPT→Wikidata Knowledge Graph")
 
 with st.sidebar:
     seed       = st.text_input("Seed term", "data warehouse")
     gpt_count  = st.slider("GPT queries on seed", 5, 100, 50)
-    max_depth  = st.slider("Wikidata depth",    1,   5,   3)
+    max_depth  = st.slider("Wikidata depth under GPT nodes", 1, 5, 3)
     build      = st.button("Build Graph")
 
-# Legend
+# legend
 st.markdown(
     "<span style='color:#1f78b4;'>🔵</span>Seed  "
     "<span style='color:#fc8d62;'>🟣</span>GPT  "
@@ -38,7 +31,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ─── 3. HELPERS ────────────────────────────────────────────
+# ─── HELPERS ─────────────────────────────────────────────
 def get_seed_related_queries(term: str, n: int) -> list[str]:
     prompt = (
         f"Give me {n} concise, distinct search queries related to “{term}”. "
@@ -52,18 +45,15 @@ def get_seed_related_queries(term: str, n: int) -> list[str]:
         ],
         temperature=0.7
     )
-    lines = resp.choices[0].message.content.splitlines()
     out = []
-    for ln in lines:
+    for ln in resp.choices[0].message.content.splitlines():
         ln = ln.strip()
         if not ln: continue
-        clean = re.sub(r"^[-•\s]+","", ln)
-        out.append(clean)
+        out.append(re.sub(r"^[-•\s]+", "", ln))
     return out
 
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    """Lookup via Wikidata API, fallback to None."""
     try:
         r = requests.get(WIKIDATA_API, params={
             "action":"wbsearchentities",
@@ -78,49 +68,40 @@ def search_qid(label: str) -> str | None:
 
 @st.cache_data
 def fetch_wikidata(qid: str) -> list[tuple[str,str]]:
-    """
-    Returns a list of (predicateLabel, objectLabel) for WD_PREDICATES.
-    """
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    preds   = " ".join(f"wdt:{p}" for p in WD_PREDICATES)
+    pred_vals = " ".join(f"wdt:{p}" for p in WD_PREDICATES)
     sparql.setQuery(f"""
       SELECT ?pLabel ?objLabel WHERE {{
-        VALUES ?p {{ {preds} }}
+        VALUES ?p {{ {pred_vals} }}
         wd:{qid} ?p ?obj .
         SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
       }}
     """)
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
-    return [
-        (r["pLabel"]["value"], r["objLabel"]["value"])
-        for r in rows
-    ]
+    return [(r["pLabel"]["value"], r["objLabel"]["value"]) for r in rows]
 
-# ─── 4. BUILD GRAPH ────────────────────────────────────────
-def build_graph(seed: str, gpt_count: int, max_depth: int):
+# ─── BUILD GRAPH ──────────────────────────────────────────
+def build_graph(seed, gpt_count, max_depth):
     G = nx.DiGraph()
-
-    # A) Add seed node
+    # A) seed node
     G.add_node(seed, label=seed, source="seed", depth=0)
 
-    # B) Pull immediate Wikidata relations off the seed
+    # B) seed’s immediate Wikidata neighbors (no recursion)
     seed_qid = search_qid(seed)
-    wiki_frontier = []
     if seed_qid:
         for pred, obj_lbl in fetch_wikidata(seed_qid):
             G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=1)
             G.add_edge(seed, obj_lbl, predicate=pred)
-            wiki_frontier.append((obj_lbl, 1))
 
-    # C) Pull the big GPT cloud around the seed
-    gpt_neighbors = get_seed_related_queries(seed, gpt_count)
-    for q in gpt_neighbors:
+    # C) GPT cloud around the seed
+    gpt_nodes = get_seed_related_queries(seed, gpt_count)
+    for q in gpt_nodes:
         G.add_node(q, label=q, source="gpt", depth=1)
         G.add_edge(seed, q, predicate="related_query")
 
-    # D) Recursively expand *all* Wikidata nodes (seed's + GPT's) to `max_depth`
-    def recurse(label: str, depth: int):
+    # D) recursion ONLY on GPT nodes (not on the seed’s WD neighbors)
+    def recurse_wikidata(label, depth):
         if depth >= max_depth:
             return
         qid = search_qid(label)
@@ -128,36 +109,34 @@ def build_graph(seed: str, gpt_count: int, max_depth: int):
             return
         for pred, obj_lbl in fetch_wikidata(qid):
             if not G.has_node(obj_lbl):
-                G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+1)
+                G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+2)
             G.add_edge(label, obj_lbl, predicate=pred)
-            recurse(obj_lbl, depth+1)
+            recurse_wikidata(obj_lbl, depth+1)
 
-    # Seed frontier + GPT neighbors
-    for lbl, d in wiki_frontier:
-        recurse(lbl, d)
-    for q in gpt_neighbors:
-        recurse(q, 1)
+    for q in gpt_nodes:
+        recurse_wikidata(q, depth=1)
 
     return G
 
-# ─── 5. VISUALIZE ─────────────────────────────────────────
-def draw_pyvis(G: nx.DiGraph) -> str:
+# ─── RENDER ───────────────────────────────────────────────
+def draw_pyvis(G):
     net = Network(height="700px", width="100%", notebook=False)
     for nid, data in G.nodes(data=True):
-        src   = data["source"]
-        color = {"seed":"#1f78b4","gpt":"#fc8d62","wikidata":"#66c2a5"}[src]
-        net.add_node(
-            nid,
-            label=data["label"],
-            title=f"{src} (depth {data['depth']})",
-            color=color
-        )
-    for u, v, d in G.edges(data=True):
+        color = {
+            "seed":"#1f78b4",
+            "gpt":"#fc8d62",
+            "wikidata":"#66c2a5"
+        }[data["source"]]
+        net.add_node(nid,
+                     label=data["label"],
+                     title=f"{data['source']} depth={data['depth']}",
+                     color=color)
+    for u,v,d in G.edges(data=True):
         net.add_edge(u, v, title=d.get("predicate",""))
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
-# ─── 6. MAIN ───────────────────────────────────────────────
+# ─── MAIN ─────────────────────────────────────────────────
 if build:
     with st.spinner("Building hybrid graph…"):
         G = build_graph(seed, gpt_count, max_depth)
