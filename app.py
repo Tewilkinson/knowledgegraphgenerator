@@ -237,14 +237,14 @@ if build:
         {
             "source": u,
             "target": v,
-            "predicate": ""  # no predicate field stored
+            "predicate": ""
         }
         for u, v in G.edges()
     ]
     df_edges = pd.DataFrame(edges)
 
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_nodes.to_excel(writer, sheet_name="nodes", index=False)
         df_edges.to_excel(writer, sheet_name="edges", index=False)
     output.seek(0)
