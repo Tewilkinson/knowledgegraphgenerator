@@ -12,6 +12,14 @@ openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
 
+# Which predicates to fetch on every Wikidata node:
+WD_PREDICATES = ["P279",  # subclass of
+                 "P31",   # instance of
+                 "P361",  # part of
+                 "P527",  # has part
+                 "P921"   # main subject
+                ]
+
 # ─── 2. UI ─────────────────────────────────────────────────
 st.set_page_config(layout="wide")
 st.title("🔎 Hybrid GPT→Wikidata Knowledge Graph")
@@ -34,7 +42,7 @@ st.markdown(
 def get_seed_related_queries(term: str, n: int) -> list[str]:
     prompt = (
         f"Give me {n} concise, distinct search queries related to “{term}”. "
-        "Return them as a bulleted list with one per line."
+        "Return them as a bulleted list, one query per line."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
@@ -55,7 +63,7 @@ def get_seed_related_queries(term: str, n: int) -> list[str]:
 
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    """Lookup QID via Wikidata API."""
+    """Lookup via Wikidata API, fallback to None."""
     try:
         r = requests.get(WIKIDATA_API, params={
             "action":"wbsearchentities",
@@ -71,60 +79,64 @@ def search_qid(label: str) -> str | None:
 @st.cache_data
 def fetch_wikidata(qid: str) -> list[tuple[str,str]]:
     """
-    Returns list of (predicateLabel, objectLabel) for P279/P31/P361.
+    Returns a list of (predicateLabel, objectLabel) for WD_PREDICATES.
     """
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
+    preds   = " ".join(f"wdt:{p}" for p in WD_PREDICATES)
     sparql.setQuery(f"""
       SELECT ?pLabel ?objLabel WHERE {{
-        VALUES ?p {{ wdt:P279 wdt:P31 wdt:P361 }}
+        VALUES ?p {{ {preds} }}
         wd:{qid} ?p ?obj .
         SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
       }}
     """)
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
-    return [(r["pLabel"]["value"], r["objLabel"]["value"]) for r in rows]
+    return [
+        (r["pLabel"]["value"], r["objLabel"]["value"])
+        for r in rows
+    ]
 
 # ─── 4. BUILD GRAPH ────────────────────────────────────────
 def build_graph(seed: str, gpt_count: int, max_depth: int):
     G = nx.DiGraph()
 
-    # 4A) Seed node
+    # A) Add seed node
     G.add_node(seed, label=seed, source="seed", depth=0)
 
-    # 4B) Wikidata off the seed
-    root_qid = search_qid(seed)
-    if root_qid:
-        for pred, obj_lbl in fetch_wikidata(root_qid):
-            # add node
+    # B) Pull immediate Wikidata relations off the seed
+    seed_qid = search_qid(seed)
+    wiki_frontier = []
+    if seed_qid:
+        for pred, obj_lbl in fetch_wikidata(seed_qid):
             G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=1)
-            # add edge
             G.add_edge(seed, obj_lbl, predicate=pred)
+            wiki_frontier.append((obj_lbl, 1))
 
-    # 4C) GPT queries around seed
-    related = get_seed_related_queries(seed, gpt_count)
-    for q in related:
+    # C) Pull the big GPT cloud around the seed
+    gpt_neighbors = get_seed_related_queries(seed, gpt_count)
+    for q in gpt_neighbors:
         G.add_node(q, label=q, source="gpt", depth=1)
         G.add_edge(seed, q, predicate="related_query")
 
-    # 4D) Under each GPT node, recurse Wikidata
+    # D) Recursively expand *all* Wikidata nodes (seed's + GPT's) to `max_depth`
     def recurse(label: str, depth: int):
-        if depth > max_depth:
+        if depth >= max_depth:
             return
         qid = search_qid(label)
         if not qid:
             return
         for pred, obj_lbl in fetch_wikidata(qid):
             if not G.has_node(obj_lbl):
-                G.add_node(obj_lbl,
-                           label=obj_lbl,
-                           source="wikidata",
-                           depth=depth+1)
+                G.add_node(obj_lbl, label=obj_lbl, source="wikidata", depth=depth+1)
             G.add_edge(label, obj_lbl, predicate=pred)
             recurse(obj_lbl, depth+1)
 
-    for q in related:
-        recurse(q, depth=1)
+    # Seed frontier + GPT neighbors
+    for lbl, d in wiki_frontier:
+        recurse(lbl, d)
+    for q in gpt_neighbors:
+        recurse(q, 1)
 
     return G
 
@@ -140,7 +152,7 @@ def draw_pyvis(G: nx.DiGraph) -> str:
             title=f"{src} (depth {data['depth']})",
             color=color
         )
-    for u,v,d in G.edges(data=True):
+    for u, v, d in G.edges(data=True):
         net.add_edge(u, v, title=d.get("predicate",""))
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
