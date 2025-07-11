@@ -2,5 +2,5 @@ streamlit
 requests
 networkx
 matplotlib
-plotly
-pyvis
+beautifulsoup4
+python-dotenv
