@@ -3,39 +3,47 @@ import requests
 import os
 import networkx as nx
 import matplotlib.pyplot as plt
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 # Load environment variables (API key and CSE ID)
 load_dotenv()
 
-# Get your API Key and Custom Search Engine ID from the environment variables
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
-CSE_ID = os.getenv('CSE_ID')
+# Get your API Key and Custom Search Engine ID from Streamlit secrets
+GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+CSE_ID = st.secrets["CSE_ID"]
+
+# Function to clean HTML from the snippet using BeautifulSoup
+def clean_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.get_text()
 
 # Function to fetch related entities from Google Custom Search API
-def get_related_entities_from_google(keyword):
-    url = f'https://www.googleapis.com/customsearch/v1?q={keyword}&key={GOOGLE_API_KEY}&cx={CSE_ID}'
-    response = requests.get(url)
-    
-    # Check if the request was successful
-    if response.status_code != 200:
-        st.error(f"Failed to fetch data from Google. HTTP Status code: {response.status_code}")
-        return []
-    
-    search_results = response.json().get('items', [])
-    
+def get_related_entities_from_google(keyword, num_results=100):
     related_entities = []
-    for result in search_results:
-        related_entities.append({
-            'title': result['title'],
-            'link': result['link'],
-            'snippet': result['snippet'],
-        })
+    for start_index in range(1, num_results + 1, 10):  # Paginate through results (10 per page)
+        url = f'https://www.googleapis.com/customsearch/v1?q={keyword}&key={GOOGLE_API_KEY}&cx={CSE_ID}&start={start_index}'
+        response = requests.get(url)
+        
+        if response.status_code != 200:
+            st.error(f"Failed to fetch data from Google. HTTP Status code: {response.status_code}")
+            return []
+        
+        search_results = response.json().get('items', [])
+        
+        for result in search_results:
+            cleaned_snippet = clean_html(result['snippet'])
+            related_entities.append({
+                'title': result['title'],
+                'link': result['link'],
+                'snippet': cleaned_snippet,
+            })
+    
     return related_entities
 
 # Function to fetch related entities from Wikidata API
-def get_related_entities_from_wikidata(keyword):
-    url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={keyword}&limit=10&format=json"
+def get_related_entities_from_wikidata(keyword, num_results=50):
+    url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={keyword}&limit={num_results}&format=json"
     response = requests.get(url)
     entities = response.json().get('search', [])
     
