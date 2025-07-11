@@ -8,14 +8,14 @@ from SPARQLWrapper import SPARQLWrapper, JSON
 from openai import OpenAI
 
 # ─── 1. CONFIG & ONTOLOGY SCHEMA ──────────────────────────────────────────
-openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 
 # Define which predicates are nominally "hierarchy" vs "association"
 ONTOLOGY = {
-    "hierarchy_predicates": ["P279", "P31"],          # subclass, instance
-    "association_predicates": ["P361", "P527", "P921"]  # part-of, has-part, main-subject
+    "hierarchy_predicates": ["P279", "P31"],            # subclass, instance
+    "association_predicates": ["P361", "P527", "P921"]  # part-of, has part, main subject
 }
 
 # ─── 2. STREAMLIT UI ───────────────────────────────────────────────────────
@@ -73,7 +73,11 @@ def get_wikidata_relations(qid: str, preds: list[str]):
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
     return [
-        (r["p"].split("/")[-1], r["pLabel"]["value"], r["objLabel"]["value"])
+        (
+            r["p"]["value"].split("/")[-1],
+            r["pLabel"]["value"],
+            r["objLabel"]["value"]
+        )
         for r in rows
     ]
 
@@ -113,10 +117,6 @@ def get_gpt_related(term: str, limit: int=10):
 
 @st.cache_data
 def classify_edge_with_gpt(parent: str, child: str) -> str:
-    """
-    Ask GPT if `child` is truly a hierarchical subtopic of `parent`.
-    Returns "hierarchy" or "association".
-    """
     prompt = (
         f"Given a domain concept **{parent}** and a candidate subtopic **{child}**,\n"
         "should this be classified as a **subtopic** or merely **related**? "
@@ -134,32 +134,29 @@ def classify_edge_with_gpt(parent: str, child: str) -> str:
     return "hierarchy" if "subtopic" in ans else "association"
 
 def load_custom_hierarchy(csv_path="custom_hierarchy.csv"):
-    """
-    CSV with rows: parent_label,child_label
-    Forces these edges as custom hierarchy.
-    """
     edges = []
     if os.path.exists(csv_path):
         with open(csv_path, newline="") as f:
-            r = csv.reader(f)
-            for row in r:
-                if len(row)>=2:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 2:
                     edges.append((row[0].strip(), row[1].strip()))
     return edges
 
 # ─── 4. BUILD GRAPH ───────────────────────────────────────────────────────
 def build_graph():
     G = nx.Graph()
-    custom = load_custom_hierarchy()
+    custom_edges = load_custom_hierarchy()
 
     # Seed
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # Custom hierarchy
-    for p,c in custom:
-        if not G.has_node(p): G.add_node(p, label=p, rel="seed", depth=0)
-        G.add_node(c, label=c, rel="custom", depth=1)
-        G.add_edge(p, c)
+    # Custom hierarchy overrides
+    for parent, child in custom_edges:
+        if not G.has_node(parent):
+            G.add_node(parent, label=parent, rel="seed", depth=0)
+        G.add_node(child, label=child, rel="custom", depth=1)
+        G.add_edge(parent, child)
 
     # Wikidata relations
     qid = lookup_qid(seed)
@@ -169,17 +166,14 @@ def build_graph():
             ONTOLOGY["hierarchy_predicates"] + ONTOLOGY["association_predicates"]
         )
         for prop, pred_lbl, obj_lbl in wrels:
-            # Determine default type
             if prop in ONTOLOGY["hierarchy_predicates"]:
-                rtype = "hierarchy"
-                # let GPT re-classify ambiguous P279 edges
                 rtype = classify_edge_with_gpt(seed, obj_lbl)
             else:
                 rtype = "association"
             G.add_node(obj_lbl, label=obj_lbl, rel=rtype, depth=1)
             G.add_edge(seed, obj_lbl)
 
-    # 1-hop ConceptNet
+    # ConceptNet neighbours
     sems = get_conceptnet_related(seed, sem_lim)
     for lbl in sems:
         G.add_node(lbl, label=lbl, rel="related", depth=1)
@@ -191,13 +185,13 @@ def build_graph():
         G.add_node(qry, label=qry, rel="gpt_seed", depth=1)
         G.add_edge(seed, qry)
 
-    # GPT on each Related & Association & Custom node
-    for n,d in G.nodes(data=True):
-        if d["rel"] in ("related","association","custom"):
-            subs = get_gpt_related(n, gpt_rel)
-            for sq in subs:
-                G.add_node(sq, label=sq, rel="gpt_related", depth=d["depth"]+1)
-                G.add_edge(n, sq)
+    # GPT on each related/association/custom node
+    for node, data in G.nodes(data=True):
+        if data["rel"] in ("related", "association", "custom"):
+            subs = get_gpt_related(node, gpt_rel)
+            for sub in subs:
+                G.add_node(sub, label=sub, rel="gpt_related", depth=data["depth"]+1)
+                G.add_edge(node, sub)
 
     return G
 
@@ -205,13 +199,13 @@ def build_graph():
 def draw_pyvis(G):
     net = Network(height="750px", width="100%", notebook=False)
     color_map = {
-        "seed":         "#1f78b4",
-        "custom":       "#2ca02c",
-        "hierarchy":    "#ff7f0e",
-        "association":  "#9467bd",
-        "related":      "#1f77b4",
-        "gpt_seed":     "#d62728",
-        "gpt_related":  "#e377c2"
+        "seed":        "#1f78b4",
+        "custom":      "#2ca02c",
+        "hierarchy":   "#ff7f0e",
+        "association": "#9467bd",
+        "related":     "#1f77b4",
+        "gpt_seed":    "#d62728",
+        "gpt_related": "#e377c2"
     }
     for nid, data in G.nodes(data=True):
         net.add_node(
@@ -220,7 +214,7 @@ def draw_pyvis(G):
             title=f"{data['rel']} (depth {data['depth']})",
             color=color_map.get(data["rel"], "#ccc")
         )
-    for u,v in G.edges():
+    for u, v in G.edges():
         net.add_edge(u, v)
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
