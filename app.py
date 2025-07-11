@@ -102,7 +102,7 @@ def draw_plotly_force_directed(G, show_subtopics, show_related, show_questions):
         marker=dict(
             color=node_color,
             size=20,
-            line_width=2
+            line=dict(width=2)  # ✅ Corrected here
         ))
 
     fig = go.Figure(
@@ -140,5 +140,8 @@ with st.sidebar:
 if st.sidebar.button("Generate Graph"):
     with st.spinner("Building graph…"):
         full_G = build_full_graph(seed, 1, max_sub, max_rel, max_rel // 2, include_q, 20)
-    fig = draw_plotly_force_directed(full_G, show_subtopics, show_related, show_questions)
-    st.plotly_chart(fig, use_container_width=True)
+    try:
+        fig = draw_plotly_force_directed(full_G, show_subtopics, show_related, show_questions)
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Plotting failed: {e}")
