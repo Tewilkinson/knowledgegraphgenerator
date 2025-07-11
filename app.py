@@ -150,7 +150,7 @@ if st.sidebar.button("Generate Graph"):
     nodes_data = [{"Topic": data["label"], "Type": data["rel"], "Depth": data["depth"]} for _, data in G.nodes(data=True)]
     df = pd.DataFrame(nodes_data)
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+   with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name="Topics")
         writer.save()
     excel_data = output.getvalue()
