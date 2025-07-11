@@ -63,13 +63,11 @@ def get_topic_trend(keyword):
         last_3 = df[keyword][-3:].mean()
         prev_3 = df[keyword][-6:-3].mean()
         yoy = ((df[keyword][-1] - df[keyword][0]) / df[keyword][0]) * 100 if df[keyword][0] != 0 else 0
-        qoq = ((last_3 - prev_3) / prev_3) * 100 if prev_3 != 0 else 0
 
         return {
             "volume": int(df[keyword].mean()),
             "3mo_trend": "up" if last_3 > prev_3 else "down" if last_3 < prev_3 else "flat",
-            "yoy": round(yoy, 1),
-            "qoq": round(qoq, 1)
+            "yoy": round(yoy, 1)
         }
     except Exception:
         return None
@@ -116,7 +114,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
             G.nodes[node]["volume"] = trend_data["volume"]
             G.nodes[node]["3mo_trend"] = trend_data["3mo_trend"]
             G.nodes[node]["yoy"] = trend_data["yoy"]
-            G.nodes[node]["qoq"] = trend_data["qoq"]
 
     return G
 
@@ -133,12 +130,7 @@ var options = {
     for node, data in G.nodes(data=True):
         title = f"{data['rel']} (depth {data['depth']})"
         if 'volume' in data:
-            title += (
-                f"<br>🔍 MSV: {data['volume']}"
-                f"<br>📈 YoY: {data['yoy']}%"
-                f"<br>📉 QoQ: {data['qoq']}%"
-                f"<br>📊 3mo Trend: {data['3mo_trend']}"
-            )
+            title += f"<br>🔍 MSV: {data['volume']}<br>📈 YoY: {data['yoy']}%<br>📊 3mo Trend: {data['3mo_trend']}"
         net.add_node(node, label=data["label"], title=title, color=colors.get(data["rel"], "#999999"))
     for u, v in G.edges():
         net.add_edge(u, v)
@@ -177,7 +169,7 @@ if st.sidebar.button("Generate Graph"):
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
 
-    # Export graph data to CSV
+    # Export graph data to Excel
     nodes_data = []
     for _, data in G.nodes(data=True):
         nodes_data.append({
@@ -186,7 +178,6 @@ if st.sidebar.button("Generate Graph"):
             "Depth": data["depth"],
             "Search Volume": data.get("volume", ""),
             "YoY Change (%)": data.get("yoy", ""),
-            "QoQ Change (%)": data.get("qoq", ""),
             "3mo Trend": data.get("3mo_trend", "")
         })
     df = pd.DataFrame(nodes_data)
