@@ -1,7 +1,7 @@
 # app.py
 
 import streamlit as st
-import requests, re, csv, os, io
+import requests, re, csv, os, io, zipfile
 import pandas as pd
 import networkx as nx
 from pyvis.network import Network
@@ -82,8 +82,10 @@ def get_conceptnet_related(term: str, limit: int=20):
         f"https://api.conceptnet.io/related/c/en/{uri}",
         params={"filter":"/c/en","limit":limit}, timeout=5
     ); r.raise_for_status()
-    return [ e["@id"].split("/")[-1].replace("_"," ")
-             for e in r.json().get("related", []) ]
+    return [
+        e["@id"].split("/")[-1].replace("_"," ")
+        for e in r.json().get("related", [])
+    ]
 
 @st.cache_data
 def get_gpt_related(term: str, limit: int=10):
@@ -99,12 +101,11 @@ def get_gpt_related(term: str, limit: int=10):
         ],
         temperature=0.7
     )
-    out = []
-    for ln in resp.choices[0].message.content.splitlines():
-        clean = re.sub(r"^[-•\s]+","", ln.strip())
-        if clean:
-            out.append(clean)
-    return out
+    return [
+        re.sub(r"^[-•\s]+","", ln.strip())
+        for ln in resp.choices[0].message.content.splitlines()
+        if ln.strip()
+    ]
 
 @st.cache_data
 def classify_edge_with_gpt(parent: str, child: str) -> str:
@@ -153,14 +154,13 @@ def build_graph():
     if qid:
         wrels = get_wikidata_relations(
             qid,
-            ONTOLOGY["hierarchy_predicates"]
+            ONTOLOGY["hierarchy_predicates"] 
             + ONTOLOGY["association_predicates"]
         )
         for prop, _, obj_lbl in wrels:
-            if prop in ONTOLOGY["hierarchy_predicates"]:
-                rtype = classify_edge_with_gpt(seed, obj_lbl)
-            else:
-                rtype = "association"
+            rtype = (classify_edge_with_gpt(seed, obj_lbl)
+                     if prop in ONTOLOGY["hierarchy_predicates"]
+                     else "association")
             G.add_node(obj_lbl, label=obj_lbl, rel=rtype, depth=1)
             G.add_edge(seed, obj_lbl)
 
@@ -177,11 +177,11 @@ def build_graph():
 
     # GPT on each related/association/custom node
     for node in list(G.nodes()):
-        data = G.nodes[node]
-        if data.get("rel") in ("related", "association", "custom"):
+        rel = G.nodes[node].get("rel")
+        if rel in ("related", "association", "custom"):
             for sub in get_gpt_related(node, gpt_rel):
                 G.add_node(sub, label=sub, rel="gpt_related",
-                           depth=data.get("depth", 0) + 1)
+                           depth=G.nodes[node]["depth"]+1)
                 G.add_edge(node, sub)
 
     return G
@@ -203,7 +203,7 @@ def draw_pyvis(G):
             nid,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
-            color=color_map.get(data.get("rel"), "#ccc")
+            color=color_map.get(data["rel"], "#ccc")
         )
     for u, v in G.edges():
         net.add_edge(u, v)
@@ -216,31 +216,29 @@ if build:
         G = build_graph()
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
 
-    # --- Export nodes to CSV ---
+    # Prepare nodes and edges DataFrames
     df_nodes = pd.DataFrame([
-        {"node_id": nid, "label": data.get("label",""),
-         "rel": data.get("rel",""), "depth": data.get("depth",0)}
+        {"node_id": nid, "label": data["label"],
+         "rel": data["rel"], "depth": data["depth"]}
         for nid, data in G.nodes(data=True)
     ])
-    csv_nodes = df_nodes.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        "💾 Download nodes CSV",
-        data=csv_nodes,
-        file_name="graph_nodes.csv",
-        mime="text/csv"
-    )
-
-    # --- Export edges to CSV ---
     df_edges = pd.DataFrame([
         {"source": u, "target": v}
         for u, v in G.edges()
     ])
-    csv_edges = df_edges.to_csv(index=False).encode('utf-8')
+
+    # Create a single ZIP in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("nodes.csv", df_nodes.to_csv(index=False))
+        zf.writestr("edges.csv", df_edges.to_csv(index=False))
+    zip_buffer.seek(0)
+
     st.download_button(
-        "💾 Download edges CSV",
-        data=csv_edges,
-        file_name="graph_edges.csv",
-        mime="text/csv"
+        label="💾 Download graph data (ZIP)",
+        data=zip_buffer,
+        file_name="knowledge_graph.zip",
+        mime="application/zip"
     )
 
     # Render the graph
