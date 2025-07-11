@@ -6,41 +6,55 @@ from openai import OpenAI
 import numpy as np
 import networkx as nx
 from pyvis.network import Network
-import requests
-import re
+import requests, re
 
-# ─── 1. CONFIG ─────────────────────────────────────────
-openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-WIKIDATA_SPARQL     = "https://query.wikidata.org/sparql"
-WIKIDATA_SEARCH_API = "https://www.wikidata.org/w/api.php"
+# ─── 1. CONFIG & CLIENTS ─────────────────────────────────
+openai_client     = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+WIKIDATA_SPARQL   = "https://query.wikidata.org/sparql"
+WIKIDATA_SEARCH   = "https://www.wikidata.org/w/api.php"
 
-MAX_DEPTH     = 4   # how deep to recurse
-GPT_TOPICS    = 5   # how many GPT subtopics per node
+# ─── 2. UI CONTROLS ────────────────────────────────────────
+st.set_page_config(layout="wide")
+st.title("🔎 Deep Interactive Wikidata Knowledge Graph")
 
-# ─── 2. QID LOOKUP ─────────────────────────────────────
+with st.sidebar:
+    seed            = st.text_input("Seed entity", "data warehouse")
+    max_depth       = st.slider("Max crawl depth", 1, 5, 3)
+    gpt_topics      = st.slider("GPT topics/node", 1, 30, 8)
+    if st.button("Build Graph"):
+        build = True
+    else:
+        build = False
+
+# Inline legend
+st.markdown(
+    "<span style='display:inline-block;width:12px;height:12px;"
+    "background-color:#66c2a5;margin-right:6px;'></span>Wikidata&nbsp;&nbsp;"
+    "<span style='display:inline-block;width:12px;height:12px;"
+    "background-color:#fc8d62;margin-right:6px;'></span>GPT",
+    unsafe_allow_html=True
+)
+
+# ─── 3. HELPERS ────────────────────────────────────────────
 @st.cache_data
 def search_qid(label: str) -> str | None:
-    r = requests.get(
-        WIKIDATA_SEARCH_API,
-        params={
-            "action": "wbsearchentities",
-            "search": label,
-            "language": "en",
-            "format": "json",
-            "limit": 1
-        }
-    ).json()
+    r = requests.get(WIKIDATA_SEARCH, params={
+        "action":"wbsearchentities",
+        "search": label,
+        "language":"en",
+        "format":"json",
+        "limit": 1
+    }).json()
     hits = r.get("search", [])
     return hits[0]["id"] if hits else None
 
-# ─── 3. FETCH WIKIDATA RELATIONS ────────────────────────
 @st.cache_data
-def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,str,str]]:
+def fetch_wikidata_relations(qid: str, preds: list[str]):
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
-    preds   = " ".join(f"wdt:{p}" for p in predicates)
+    pvals   = " ".join(f"wdt:{p}" for p in preds)
     sparql.setQuery(f"""
       SELECT ?pLabel ?obj ?objLabel WHERE {{
-        VALUES ?p {{ {preds} }}
+        VALUES ?p {{ {pvals} }}
         wd:{qid} ?p ?obj .
         SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
       }}
@@ -48,17 +62,14 @@ def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,
     sparql.setReturnFormat(JSON)
     rows = sparql.query().convert()["results"]["bindings"]
     return [
-        (
-            b["pLabel"]["value"],
-            b["obj"]["value"].rsplit("/",1)[-1],
-            b["objLabel"]["value"]
-        )
-        for b in rows
+        (r["pLabel"]["value"],
+         r["obj"]["value"].rsplit("/",1)[-1],
+         r["objLabel"]["value"])
+      for r in rows
     ]
 
-# ─── 4. GPT “RELATED SUBTOPICS” ─────────────────────────
 @st.cache_data
-def get_related_topics(label: str, n: int = GPT_TOPICS) -> list[str]:
+def get_related_topics(label: str, n: int):
     prompt = (
         f"List {n} DISTINCT, concise subtopics of “{label}” "
         "as a bullet list. Return ONLY the subtopic names."
@@ -75,92 +86,81 @@ def get_related_topics(label: str, n: int = GPT_TOPICS) -> list[str]:
     out = []
     for ln in text.splitlines():
         ln = ln.strip()
-        if not ln:
+        if not ln: 
             continue
         clean = re.sub(r"^[-•\d\.\)\s]+","", ln)
         if clean:
             out.append(clean)
     return out
 
-# ─── 5. OPENAI EMBEDDINGS ───────────────────────────────
-@st.cache_data
-def get_embedding(text: str) -> np.ndarray:
-    resp = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=[text]
-    )
-    return np.array(resp.data[0].embedding)
-
-# ─── 6. RECURSIVE GRAPH EXPANSION ───────────────────────
-def expand_node(
-    G: nx.DiGraph,
-    qid: str,
-    label: str,
-    depth: int
-):
+# ─── 4. GRAPH EXPANSION ────────────────────────────────────
+def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
+    """
+    Adds node(qid,label,depth,source) then recurses:
+      - Wikidata (P279,P31,P361) if qid startswith 'Q'
+      - GPT related_to for every node
+    """
+    # 1) If we've already added this exact qid, just update depth/label if missing
     if G.has_node(qid):
+        meta = G.nodes[qid]
+        meta.setdefault("label", label)
+        meta.setdefault("depth", depth)
         return
 
-    # add node metadata
-    G.add_node(qid, label=label, depth=depth)
+    # 2) Classify source
+    source = "wikidata" if qid.startswith("Q") else "gpt"
+    G.add_node(qid, label=label, depth=depth, source=source)
 
-    # stop if we've reached max depth
-    if depth >= MAX_DEPTH:
+    # 3) Stop at max depth
+    if depth >= max_depth:
         return
 
-    # 1) Wikidata relations
-    for pred, obj_qid, obj_label in fetch_wikidata_relations(
-        qid, predicates=["P279","P31","P361"]
-    ):
-        G.add_edge(qid, obj_qid, predicate=pred)
-        expand_node(G, obj_qid, obj_label, depth+1)
+    # 4) Wikidata relations
+    if source == "wikidata":
+        for pred, obj_id, obj_lbl in fetch_wikidata_relations(
+            qid, ["P279","P31","P361"]
+        ):
+            G.add_edge(qid, obj_id, predicate=pred)
+            expand_node(G, obj_id, obj_lbl, depth+1)
 
-    # 2) GPT subtopics
-    for sub in get_related_topics(label):
-        sub_qid = search_qid(sub)
+    # 5) GPT subtopics
+    for sub in get_related_topics(label, gpt_topics):
+        sub_qid = search_qid(sub)  # maybe None
         node_id = sub_qid or f"GPT:{sub}"
-        G.add_node(node_id, label=sub, depth=depth+1)
         G.add_edge(qid, node_id, predicate="related_to")
         expand_node(G, node_id, sub, depth+1)
 
-# ─── 7. RENDER WITH PYVIS ────────────────────────────────
+# ─── 5. VISUALIZATION ─────────────────────────────────────
 def draw_pyvis(G: nx.DiGraph) -> str:
     net = Network(height="700px", width="100%", notebook=False)
-    depths = [d.get("depth",0) for _,d in G.nodes(data=True)]
-    maxd   = max(depths) if depths else 0
 
-    for nid,data in G.nodes(data=True):
-        d   = data.get("depth",0)
-        lbl = data.get("label", nid)
-        # gradient color by depth
-        r = int(255 * d/(maxd or 1))
-        g = int(200 * (maxd-d)/(maxd or 1))
-        net.add_node(nid, label=lbl, title=f"Depth: {d}",
-                     color=f"rgba({r},{g},150,0.8)")
+    # Add every node with its human label & color by source
+    for nid, data in G.nodes(data=True):
+        lbl    = data.get("label", nid)
+        color  = "#66c2a5" if data.get("source")=="wikidata" else "#fc8d62"
+        title  = f"{lbl} (depth {data.get('depth')})"
+        net.add_node(nid, label=lbl, title=title, color=color)
 
+    # Add edges
     for u,v,data in G.edges(data=True):
         net.add_edge(u, v, title=data.get("predicate",""))
 
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
-# ─── 8. STREAMLIT UI ─────────────────────────────────────
-st.set_page_config(layout="wide")
-st.title("🔎 Deep Interactive Wikidata Knowledge Graph")
-
-seed = st.text_input("🔍 Seed entity", value="data warehouse")
-if st.button("Build Deep Graph"):
-    # resolve root QID
-    qid = search_qid(seed)
-    if not qid:
+# ─── 6. MAIN ───────────────────────────────────────────────
+if build:
+    with st.spinner("Resolving seed to QID…"):
+        root_qid = search_qid(seed)
+    if not root_qid:
         st.error(f"No Wikidata match for “{seed}”.")
         st.stop()
 
-    st.success(f"Matched “{seed}” → {qid}")
+    st.success(f"Seed → QID {root_qid}")
     G = nx.DiGraph()
-    with st.spinner("Expanding... this may take a moment"):
-        expand_node(G, qid, seed, depth=0)
+    with st.spinner("Expanding graph… this may take a while"):
+        expand_node(G, root_qid, seed, depth=0)
 
-    st.info(f"🚀 Graph ready: {len(G.nodes)} nodes, {len(G.edges)} edges.")
+    st.info(f"🚀 Graph built: {len(G.nodes)} nodes, {len(G.edges)} edges.")
     html = draw_pyvis(G)
     st.components.v1.html(html, height=750, scrolling=True)
