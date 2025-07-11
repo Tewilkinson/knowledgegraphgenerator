@@ -152,7 +152,7 @@ def build_graph():
         G.add_node(child, label=child, rel="custom", depth=1)
         G.add_edge(parent, child)
 
-    # Wikidata relations (hierarchy vs related)
+    # Wikidata relations (demote all P279 to related)
     qid = lookup_qid(seed)
     if qid:
         wrels = get_wikidata_relations(
@@ -161,7 +161,9 @@ def build_graph():
             + ONTOLOGY["association_predicates"]
         )
         for prop, _, obj_lbl in wrels:
-            if prop in ONTOLOGY["hierarchy_predicates"]:
+            if prop == "P279":
+                rtype = "related"
+            elif prop in ONTOLOGY["hierarchy_predicates"]:
                 rtype = classify_edge_with_gpt(seed, obj_lbl)
             else:
                 rtype = "related"
@@ -181,7 +183,7 @@ def build_graph():
     # GPT on each related/association/custom node
     for node in list(G.nodes()):
         rel = G.nodes[node].get("rel")
-        if rel in ("related", "association", "custom"):
+        if rel in ("related", "custom"):
             for sub in get_gpt_related(node, gpt_rel):
                 G.add_node(sub, label=sub, rel="gpt_related",
                            depth=G.nodes[node]["depth"]+1)
@@ -197,7 +199,6 @@ def draw_pyvis(G):
         "custom":      "#2ca02c",
         "hierarchy":   "#ff7f0e",
         "related":     "#9467bd",
-        "association": "#9467bd",
         "gpt_seed":    "#d62728",
         "gpt_related": "#e377c2"
     }
@@ -206,7 +207,7 @@ def draw_pyvis(G):
             nid,
             label=data["label"],
             title=f"{data['rel']} (depth {data['depth']})",
-            color=color_map.get(data.get("rel"), "#ccc")
+            color=color_map.get(data["rel"], "#ccc")
         )
     for u, v in G.edges():
         net.add_edge(u, v)
