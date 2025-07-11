@@ -84,11 +84,11 @@ def get_gpt_neighbors(term: str, limit: int = 10):
     return out
 
 # ─── BUILD GRAPH ─────────────────────────────────────────
-def build_graph(seed, sub_depth, tax_lim, sem_lim, rq_seed_lim, rq_rel_lim):
+def build_graph(seed, sub_depth, tax_lim, sem_lim, sem_sub_lim, rq_seed_lim):
     G = nx.Graph()
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # P279 subtopics
+    # P279 subtopics of seed
     qid = lookup_qid(seed)
     if qid:
         lvl1 = get_subclasses(qid, tax_lim)
@@ -105,11 +105,19 @@ def build_graph(seed, sub_depth, tax_lim, sem_lim, rq_seed_lim, rq_rel_lim):
                         G.add_node(c2lbl, label=c2lbl, rel="subtopic", depth=2)
                     G.add_edge(clbl, c2lbl)
 
-    # ConceptNet related
+    # ConceptNet related to seed
     sems = get_conceptnet_neighbors(seed, sem_lim)
     for lbl in sems:
         G.add_node(lbl, label=lbl, rel="related", depth=1)
         G.add_edge(seed, lbl)
+
+    # Sub-related ConceptNet topics (second-level)
+    for lbl in sems:
+        secs = get_conceptnet_neighbors(lbl, sem_sub_lim)
+        for sl in secs:
+            if not G.has_node(sl):
+                G.add_node(sl, label=sl, rel="related", depth=2)
+            G.add_edge(lbl, sl)
 
     # GPT Related Questions on seed
     rqs = get_gpt_neighbors(seed, rq_seed_lim)
@@ -117,19 +125,11 @@ def build_graph(seed, sub_depth, tax_lim, sem_lim, rq_seed_lim, rq_rel_lim):
         G.add_node(qry, label=qry, rel="related_question", depth=1)
         G.add_edge(seed, qry)
 
-    # GPT Related Questions on each ConceptNet related
-    for lbl in sems:
-        subqs = get_gpt_neighbors(lbl, rq_rel_lim)
-        for sq in subqs:
-            G.add_node(sq, label=sq, rel="related_question", depth=2)
-            G.add_edge(lbl, sq)
-
     return G
 
 # ─── VISUALIZE ───────────────────────────────────────────
 def draw_pyvis(G: nx.Graph):
     net = Network(height="750px", width="100%", notebook=False)
-    # Enable navigation controls and physics
     net.set_options("""
     var options = {
       "interaction": {"hover": true, "navigationButtons": true, "keyboard": true},
@@ -165,12 +165,12 @@ seed = st.sidebar.text_input("Seed topic", "data warehouse")
 sub_d = st.sidebar.slider("Subtopic depth (P279)", 1, 2, 1)
 tax_lim = st.sidebar.slider("Max subtopics", 5, 50, 20)
 sem_lim = st.sidebar.slider("Max related terms (ConceptNet)", 5, 50, 20)
+sem_sub_lim = st.sidebar.slider("Max sub-related terms", 0, 50, 10)
 rq_seed = st.sidebar.slider("Related Questions on seed", 5, 50, 20)
-rq_rel = st.sidebar.slider("Related Questions on related", 2, 20, 5)
 
 if st.sidebar.button("Generate Graph"):
     with st.spinner("Building graph…"):
-        G = build_graph(seed, sub_d, tax_lim, sem_lim, rq_seed, rq_rel)
+        G = build_graph(seed, sub_d, tax_lim, sem_lim, sem_sub_lim, rq_seed)
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
     # Legend
     st.markdown(
