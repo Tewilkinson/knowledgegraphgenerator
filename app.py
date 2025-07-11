@@ -13,13 +13,6 @@ openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 # ─── HELPERS ────────────────────────────────────────────
 @st.cache_data
 def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
-    """
-    Fetch neighbors of a given type using ChatGPT:
-      - rel='subtopic': more specific topics (subclasses)
-      - rel='related': related concepts
-      - rel='related_question': user search questions
-    Returns a list of strings.
-    """
     if rel == "subtopic":
         prompt = (
             f"Provide a JSON array of up to {limit} concise, distinct subtopics "
@@ -63,7 +56,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
     G = nx.Graph()
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # Subtopics
     level1 = get_llm_neighbors(seed, "subtopic", max_sub)
     for topic in level1:
         G.add_node(topic, label=topic, rel="subtopic", depth=1)
@@ -76,7 +68,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
                     G.add_node(sub2, label=sub2, rel="subtopic", depth=2)
                 G.add_edge(topic, sub2)
 
-    # Related concepts
     related = get_llm_neighbors(seed, "related", max_rel)
     for concept in related:
         G.add_node(concept, label=concept, rel="related", depth=1)
@@ -88,7 +79,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
                 G.add_node(sr, label=sr, rel="related", depth=2)
             G.add_edge(concept, sr)
 
-    # Related questions
     if include_q:
         questions = get_llm_neighbors(seed, "related_question", max_q)
         for q in questions:
@@ -116,7 +106,6 @@ var options = {
 st.set_page_config(layout="wide")
 st.title("🔗 LLM-driven Knowledge Graph Generator")
 
-# Sidebar
 with st.sidebar:
     st.header("Controls")
     seed = st.text_input("Seed topic", "data warehouse")
@@ -150,9 +139,8 @@ if st.sidebar.button("Generate Graph"):
     nodes_data = [{"Topic": data["label"], "Type": data["rel"], "Depth": data["depth"]} for _, data in G.nodes(data=True)]
     df = pd.DataFrame(nodes_data)
     output = io.BytesIO()
-   with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name="Topics")
-        writer.save()
     excel_data = output.getvalue()
 
     st.download_button(
