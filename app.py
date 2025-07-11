@@ -21,19 +21,30 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def extract_triples(concept: str, max_triples: int = 6):
-    # Build prompt without using triple-quoted f-strings
+    """
+    Queries the OpenAI API for triples related to a concept and returns a JSON list of [subject, relation, object].
+    Handles non-JSON responses by surfacing the raw text.
+    """
     prompt = (
         f"You’re a KG extractor. Given the concept \"{concept}\", "
         f"list up to {max_triples} related concepts as a JSON array of "
         "[subject, relation, object] triples. "
         "Use relations like \"subclass_of\" or \"related_to\"."
     )
-    # Use the new OpenAI v1 interface
-    resp = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return json.loads(resp.choices[0].message.content)
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = resp.choices[0].message.content.strip()
+        # Attempt JSON parse
+        return json.loads(text)
+    except json.JSONDecodeError:
+        st.error(f"API returned non-JSON response for '{concept}':\n{text}")
+        return []
+    except Exception as e:
+        st.error(f"OpenAI API error for '{concept}': {e}")
+        return []
 
 
 def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
@@ -44,10 +55,8 @@ def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
         node, d = queue.popleft()
         if d >= depth:
             continue
-        try:
-            triples = extract_triples(node, max_triples)
-        except Exception as e:
-            st.error(f"Failed to extract triples for '{node}': {e}")
+        triples = extract_triples(node, max_triples)
+        if not triples:
             continue
         for s, rel, o in triples:
             G.add_node(s)
@@ -61,6 +70,8 @@ def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
 
 def detect_communities(G: nx.Graph):
     # Use Louvain on the undirected graph for community detection
+    if G.number_of_nodes() == 0:
+        return {}
     partition = community_louvain.best_partition(G.to_undirected())
     return partition
 
@@ -79,8 +90,7 @@ def visualize_pyvis(G: nx.DiGraph, partition: dict):
     tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".html").name
     net.show(tmpfile)
     with open(tmpfile, "r", encoding="utf-8") as f:
-        html = f.read()
-    return html
+        return f.read()
 
 
 def main():
