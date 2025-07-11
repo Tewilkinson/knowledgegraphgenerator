@@ -15,9 +15,9 @@ WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 def lookup_qid(label: str) -> str | None:
     try:
         r = requests.get(WIKIDATA_API, params={
-            "action":"wbsearchentities",
-            "format":"json",
-            "language":"en",
+            "action": "wbsearchentities",
+            "format": "json",
+            "language": "en",
             "search": label,
             "limit": 1
         }, timeout=5)
@@ -28,41 +28,42 @@ def lookup_qid(label: str) -> str | None:
         return None
 
 @st.cache_data
-def get_subclasses(qid: str, limit: int=20):
+def get_subclasses(qid: str, limit: int = 20):
     sparql = f"""
-      SELECT ?child ?childLabel WHERE {{
-        ?child wdt:P279 wd:{qid} .
-        SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-      }} LIMIT {limit}
+    SELECT ?child ?childLabel WHERE {
+      ?child wdt:P279 wd:{qid} .
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+    } LIMIT {limit}
     """
     r = requests.get(
         WIKIDATA_SPARQL,
         params={"query": sparql},
-        headers={"Accept":"application/sparql-results+json"},
+        headers={"Accept": "application/sparql-results+json"},
         timeout=10
-    ); r.raise_for_status()
+    )
+    r.raise_for_status()
     rows = r.json()["results"]["bindings"]
     return [
-        (row["child"]["value"].rsplit("/",1)[-1],
-         row["childLabel"]["value"])
+        (row["child"]["value"].rsplit("/", 1)[-1], row["childLabel"]["value"])
         for row in rows
     ]
 
 @st.cache_data
-def get_conceptnet_neighbors(term: str, limit: int=20):
+def get_conceptnet_neighbors(term: str, limit: int = 20):
     uri = term.lower().replace(" ", "_")
     r = requests.get(
         f"https://api.conceptnet.io/related/c/en/{uri}",
-        params={"filter":"/c/en","limit":limit},
+        params={"filter": "/c/en", "limit": limit},
         timeout=5
-    ); r.raise_for_status()
+    )
+    r.raise_for_status()
     return [
-        e["@id"].split("/")[-1].replace("_"," ")
+        e["@id"].split("/")[-1].replace("_", " ")
         for e in r.json().get("related", [])
     ]
 
 @st.cache_data
-def get_gpt_neighbors(term: str, limit: int=10):
+def get_gpt_neighbors(term: str, limit: int = 10):
     prompt = (
         f"List {limit} concise, distinct search queries related to “{term}”. "
         "Return them as a bulleted list, one per line."
@@ -70,15 +71,16 @@ def get_gpt_neighbors(term: str, limit: int=10):
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role":"system","content":"You are a helpful assistant."},
-            {"role":"user","content":prompt}
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
         ],
         temperature=0.7
     )
     out = []
     for ln in resp.choices[0].message.content.splitlines():
-        clean = re.sub(r"^[-•\s]+","", ln.strip())
-        if clean: out.append(clean)
+        clean = re.sub(r"^[-•\s]+", "", ln.strip())
+        if clean:
+            out.append(clean)
     return out
 
 # ─── BUILD GRAPH ─────────────────────────────────────────
@@ -96,8 +98,9 @@ def build_graph(seed, sub_depth, tax_lim, sem_lim, rq_seed_lim, rq_rel_lim):
         if sub_depth > 1:
             for cid, clbl in lvl1:
                 cqid = lookup_qid(clbl)
-                if not cqid: continue
-                for c2id, c2lbl in get_subclasses(cqid, max(1, tax_lim//2)):
+                if not cqid:
+                    continue
+                for c2id, c2lbl in get_subclasses(cqid, max(1, tax_lim // 2)):
                     if not G.has_node(c2lbl):
                         G.add_node(c2lbl, label=c2lbl, rel="subtopic", depth=2)
                     G.add_edge(clbl, c2lbl)
@@ -127,18 +130,18 @@ def build_graph(seed, sub_depth, tax_lim, sem_lim, rq_seed_lim, rq_rel_lim):
 def draw_pyvis(G: nx.Graph):
     net = Network(height="750px", width="100%", notebook=False)
     # Enable navigation controls and physics
-    net.set_options(
+    net.set_options("""
     var options = {
       "interaction": {"hover": true, "navigationButtons": true, "keyboard": true},
       "physics": {"enabled": true, "stabilization": {"iterations": 500}}
     }
-    """")
+    """)
 
     color_map = {
-        "seed":            "#1f78b4",
-        "subtopic":        "#66c2a5",
-        "related":         "#61b2ff",
-        "related_question":"#ffcc61",
+        "seed": "#1f78b4",
+        "subtopic": "#66c2a5",
+        "related": "#61b2ff",
+        "related_question": "#ffcc61",
     }
     for nid, data in G.nodes(data=True):
         net.add_node(
@@ -147,7 +150,7 @@ def draw_pyvis(G: nx.Graph):
             title=f"{data['rel']} (depth {data['depth']})",
             color=color_map.get(data["rel"], "#999999")
         )
-    for u,v in G.edges():
+    for u, v in G.edges():
         net.add_edge(u, v)
 
     return net.generate_html()
@@ -158,12 +161,12 @@ st.title("🔗 Hybrid Wikidata/ConceptNet + GPT Clusters")
 
 # Sidebar controls
 st.sidebar.header("Controls")
-seed     = st.sidebar.text_input("Seed topic", "data warehouse")
-sub_d    = st.sidebar.slider("Subtopic depth (P279)", 1, 2, 1)
-tax_lim  = st.sidebar.slider("Max subtopics", 5, 50, 20)
-sem_lim  = st.sidebar.slider("Max related terms (ConceptNet)", 5, 50, 20)
-rq_seed  = st.sidebar.slider("Related Questions on seed", 5, 50, 20)
-rq_rel   = st.sidebar.slider("Related Questions on related", 2, 20, 5)
+seed = st.sidebar.text_input("Seed topic", "data warehouse")
+sub_d = st.sidebar.slider("Subtopic depth (P279)", 1, 2, 1)
+tax_lim = st.sidebar.slider("Max subtopics", 5, 50, 20)
+sem_lim = st.sidebar.slider("Max related terms (ConceptNet)", 5, 50, 20)
+rq_seed = st.sidebar.slider("Related Questions on seed", 5, 50, 20)
+rq_rel = st.sidebar.slider("Related Questions on related", 2, 20, 5)
 
 if st.sidebar.button("Generate Graph"):
     with st.spinner("Building graph…"):
