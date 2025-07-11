@@ -1,9 +1,6 @@
+pandas
+xlsxwriter
 streamlit
-requests
-networkx
-python-louvain
-pyvis
-SPARQLWrapper
-streamlit-cytoscapejs
 openai
-plotly
+networkx
+pyvis
