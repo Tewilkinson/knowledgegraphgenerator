@@ -9,18 +9,19 @@ import community as community_louvain  # pip install python-louvain
 from pyvis.network import Network  # pip install pyvis
 from openai import OpenAI
 
-# ── Streamlit & OpenAI config ─────────────────────────────────────────────────
+# Page configuration and OpenAI client setup
 st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def extract_triples(concept: str, max_triples: int = 6):
-    prompt = f"""
-You’re a KG extractor. Given the concept "{concept}",
-list up to {max_triples} related concepts as a JSON array of
-[subject, relation, object] triples.
-Use relations like "subclass_of" or "related_to".
-
+    # Build prompt without using triple-quoted f-strings to avoid quoting issues
+    prompt = (
+        f"You’re a KG extractor. Given the concept \"{concept}\", "
+        f"list up to {max_triples} related concepts as a JSON array of "
+        "[subject, relation, object] triples. "
+        "Use relations like \"subclass_of\" or \"related_to\"."
+    )
     resp = openai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}]
@@ -52,7 +53,7 @@ def build_graph(seed: str, depth: int = 2, max_triples: int = 6):
 
 
 def detect_communities(G: nx.Graph):
-    # Louvain on undirected graph
+    # Use Louvain on the undirected graph for community detection
     partition = community_louvain.best_partition(G.to_undirected())
     return partition
 
@@ -77,6 +78,8 @@ def visualize_pyvis(G: nx.DiGraph, partition: dict):
 
 def main():
     st.title("🔍 Knowledge Graph Explorer")
+
+    # User inputs
     seed = st.text_input("Enter seed topic", value="Spatial data warehouse")
     depth = st.slider("Expansion depth", 1, 3, 2)
     max_triples = st.slider("Triples per node", 2, 8, 4)
