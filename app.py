@@ -32,8 +32,8 @@ def extract_triples(concept: str, max_triples: int = 6):
         "Use relations like \"subclass_of\" or \"related_to\"."
     )
     try:
-        # Updated to use new OpenAI v1 API interface
-        resp = openai.chat.completions.create(
+        # Use the openai.ChatCompletion interface (v1+)
+        resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
