@@ -30,10 +30,10 @@ def lookup_qid(label: str) -> str | None:
 @st.cache_data
 def get_subclasses(qid: str, limit: int = 20):
     sparql = f"""
-    SELECT ?child ?childLabel WHERE {
+    SELECT ?child ?childLabel WHERE {{
       ?child wdt:P279 wd:{qid} .
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-    } LIMIT {limit}
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en\". }}
+    }} LIMIT {limit}
     """
     r = requests.get(
         WIKIDATA_SPARQL,
@@ -65,7 +65,7 @@ def get_conceptnet_neighbors(term: str, limit: int = 20):
 @st.cache_data
 def get_gpt_neighbors(term: str, limit: int = 10):
     prompt = (
-        f"List {limit} concise, distinct search queries related to “{term}”. "
+        f"List {limit} concise, distinct search queries related to \u201C{term}\u201D. "
         "Return them as a bulleted list, one per line."
     )
     resp = openai_client.chat.completions.create(
