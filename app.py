@@ -1,126 +1,98 @@
 import streamlit as st
-import requests, re
+import re
 import networkx as nx
 from pyvis.network import Network
-from SPARQLWrapper import SPARQLWrapper, JSON
 from openai import OpenAI
+import json
 
 # ─── CONFIG ────────────────────────────────────────────
-openai_client   = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-WIKIDATA_API    = "https://www.wikidata.org/w/api.php"
-WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # ─── HELPERS ────────────────────────────────────────────
 @st.cache_data
-def lookup_qid(label: str) -> str | None:
-    try:
-        r = requests.get(WIKIDATA_API, params={
-            "action": "wbsearchentities",
-            "format": "json",
-            "language": "en",
-            "search": label,
-            "limit": 1
-        }, timeout=5)
-        r.raise_for_status()
-        hits = r.json().get("search", [])
-        return hits[0]["id"] if hits else None
-    except:
-        return None
-
-@st.cache_data
-def get_subclasses(qid: str, limit: int = 20):
-    sparql = f"""
-    SELECT ?child ?childLabel WHERE {{
-      ?child wdt:P279 wd:{qid} .
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language \"en\". }}
-    }} LIMIT {limit}
+def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
     """
-    r = requests.get(
-        WIKIDATA_SPARQL,
-        params={"query": sparql},
-        headers={"Accept": "application/sparql-results+json"},
-        timeout=10
-    )
-    r.raise_for_status()
-    rows = r.json()["results"]["bindings"]
-    return [
-        (row["child"]["value"].rsplit("/", 1)[-1], row["childLabel"]["value"])
-        for row in rows
-    ]
+    Fetch neighbors of a given type using ChatGPT:
+      - rel='subtopic': more specific topics (subclasses)
+      - rel='related': related concepts
+      - rel='related_question': user search questions
+    Returns a list of strings.
+    """
+    if rel == "subtopic":
+        prompt = (
+            f"Provide a JSON array of up to {limit} concise, distinct subtopics "
+            f"(more specific topics) of \"{term}\"."
+        )
+    elif rel == "related":
+        prompt = (
+            f"Provide a JSON array of up to {limit} concise, distinct concepts "
+            f"related to but not subtopics of \"{term}\"."
+        )
+    elif rel == "related_question":
+        prompt = (
+            f"Provide a JSON array of up to {limit} distinct user search "
+            f"queries (phrased as questions) related to \"{term}\"."
+        )
+    else:
+        return []
 
-@st.cache_data
-def get_conceptnet_neighbors(term: str, limit: int = 20):
-    uri = term.lower().replace(" ", "_")
-    r = requests.get(
-        f"https://api.conceptnet.io/related/c/en/{uri}",
-        params={"filter": "/c/en", "limit": limit},
-        timeout=5
-    )
-    r.raise_for_status()
-    return [
-        e["@id"].split("/")[-1].replace("_", " ")
-        for e in r.json().get("related", [])
-    ]
-
-@st.cache_data
-def get_gpt_neighbors(term: str, limit: int = 10):
-    prompt = (
-        f"List {limit} concise, distinct search queries related to \u201C{term}\u201D. "
-        "Return them as a bulleted list, one per line."
-    )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": "You are a helpful assistant that outputs only JSON arrays of strings."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.7
     )
-    out = []
-    for ln in resp.choices[0].message.content.splitlines():
-        clean = re.sub(r"^[-•\s]+", "", ln.strip())
-        if clean:
-            out.append(clean)
-    return out
+
+    content = resp.choices[0].message.content
+    try:
+        arr = json.loads(content)
+        # ensure list of strings
+        return [str(item) for item in arr][:limit]
+    except json.JSONDecodeError:
+        # fallback: parse lines
+        out = []
+        for ln in content.splitlines():
+            clean = re.sub(r"^[-•\s]+", "", ln.strip())
+            if clean:
+                out.append(clean)
+        return out[:limit]
 
 # ─── BUILD GRAPH ─────────────────────────────────────────
 def build_graph(seed, sub_depth, tax_lim, sem_lim, sem_sub_lim, rq_seed_lim):
     G = nx.Graph()
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
-    # P279 subtopics of seed
-    qid = lookup_qid(seed)
-    if qid:
-        lvl1 = get_subclasses(qid, tax_lim)
-        for cid, clbl in lvl1:
-            G.add_node(clbl, label=clbl, rel="subtopic", depth=1)
-            G.add_edge(seed, clbl)
-        if sub_depth > 1:
-            for cid, clbl in lvl1:
-                cqid = lookup_qid(clbl)
-                if not cqid:
-                    continue
-                for c2id, c2lbl in get_subclasses(cqid, max(1, tax_lim // 2)):
-                    if not G.has_node(c2lbl):
-                        G.add_node(c2lbl, label=c2lbl, rel="subtopic", depth=2)
-                    G.add_edge(clbl, c2lbl)
+    # ChatGPT-derived subtopics
+    lvl1 = get_llm_neighbors(seed, "subtopic", tax_lim)
+    for clbl in lvl1:
+        G.add_node(clbl, label=clbl, rel="subtopic", depth=1)
+        G.add_edge(seed, clbl)
+    if sub_depth > 1:
+        for clbl in lvl1:
+            lvl2 = get_llm_neighbors(clbl, "subtopic", max(1, tax_lim // 2))
+            for c2lbl in lvl2:
+                if not G.has_node(c2lbl):
+                    G.add_node(c2lbl, label=c2lbl, rel="subtopic", depth=2)
+                G.add_edge(clbl, c2lbl)
 
-    # ConceptNet related to seed
-    sems = get_conceptnet_neighbors(seed, sem_lim)
+    # ChatGPT-derived related concepts
+    sems = get_llm_neighbors(seed, "related", sem_lim)
     for lbl in sems:
         G.add_node(lbl, label=lbl, rel="related", depth=1)
         G.add_edge(seed, lbl)
 
-    # Sub-related ConceptNet topics (second-level)
+    # Second-level related
     for lbl in sems:
-        secs = get_conceptnet_neighbors(lbl, sem_sub_lim)
+        secs = get_llm_neighbors(lbl, "related", sem_sub_lim)
         for sl in secs:
             if not G.has_node(sl):
                 G.add_node(sl, label=sl, rel="related", depth=2)
             G.add_edge(lbl, sl)
 
-    # GPT Related Questions on seed
-    rqs = get_gpt_neighbors(seed, rq_seed_lim)
+    # ChatGPT-derived related questions
+    rqs = get_llm_neighbors(seed, "related_question", rq_seed_lim)
     for qry in rqs:
         G.add_node(qry, label=qry, rel="related_question", depth=1)
         G.add_edge(seed, qry)
@@ -157,16 +129,16 @@ def draw_pyvis(G: nx.Graph):
 
 # ─── STREAMLIT UI ────────────────────────────────────────
 st.set_page_config(layout="wide")
-st.title("🔗 Hybrid Wikidata/ConceptNet + GPT Clusters")
+st.title("🔗 LLM-driven Knowledge Graph Generator")
 
 # Sidebar controls
 st.sidebar.header("Controls")
 seed = st.sidebar.text_input("Seed topic", "data warehouse")
-sub_d = st.sidebar.slider("Subtopic depth (P279)", 1, 2, 1)
+sub_d = st.sidebar.slider("Subtopic depth", 1, 2, 1)
 tax_lim = st.sidebar.slider("Max subtopics", 5, 50, 20)
-sem_lim = st.sidebar.slider("Max related terms (ConceptNet)", 5, 50, 20)
+sem_lim = st.sidebar.slider("Max related terms", 5, 50, 20)
 sem_sub_lim = st.sidebar.slider("Max sub-related terms", 0, 50, 10)
-rq_seed = st.sidebar.slider("Related Questions on seed", 5, 50, 20)
+rq_seed = st.sidebar.slider("Related Questions", 5, 50, 20)
 
 if st.sidebar.button("Generate Graph"):
     with st.spinner("Building graph…"):
