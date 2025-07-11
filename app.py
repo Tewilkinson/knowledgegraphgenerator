@@ -40,19 +40,43 @@ def get_related_entities_from_google(keyword, num_results=100):
     
     return related_entities
 
-# Function to fetch related entities from Wikidata API
+# Function to fetch related entities from Wikidata API, including relationships
 def get_related_entities_from_wikidata(keyword, num_results=50):
     url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={keyword}&limit={num_results}&format=json"
     response = requests.get(url)
     entities = response.json().get('search', [])
     
     related_entities = []
+    
+    # Fetch detailed information about each entity
     for entity in entities:
+        entity_id = entity['id']
+        details_url = f"https://www.wikidata.org/w/api.php?action=wbgetentities&ids={entity_id}&format=json"
+        details_response = requests.get(details_url)
+        entity_details = details_response.json().get('entities', {}).get(entity_id, {})
+        
+        # Extract relevant information like instance of, educated at, etc.
+        claims = entity_details.get('claims', {})
+        relationships = []
+
+        # Example relationships: instance of (P31), educated at (P69)
+        if 'P31' in claims:  # Instance of (e.g., Human)
+            for claim in claims['P31']:
+                related_entity_id = claim['mainsnak']['datavalue']['value']['id']
+                relationships.append(('instance_of', related_entity_id))
+
+        if 'P69' in claims:  # Educated at (e.g., Princeton University)
+            for claim in claims['P69']:
+                related_entity_id = claim['mainsnak']['datavalue']['value']['id']
+                relationships.append(('educated_at', related_entity_id))
+        
         related_entities.append({
-            'id': entity['id'],
+            'id': entity_id,
             'label': entity['label'],
-            'description': entity.get('description', 'No description available')
+            'description': entity.get('description', 'No description available'),
+            'relationships': relationships
         })
+    
     return related_entities
 
 # Function to visualize knowledge graph using Plotly
@@ -73,6 +97,14 @@ def visualize_graph(google_entities, wikidata_entities):
     for entity in wikidata_entities:
         if entity['label'] not in nodes:
             nodes.append(entity['label'])
+        
+        # Add relationships as edges
+        for relationship in entity['relationships']:
+            related_entity = relationship[1]  # The related entity ID
+            related_entity_label = next(
+                (e['label'] for e in wikidata_entities if e['id'] == related_entity), None)
+            if related_entity_label:
+                edges.append((entity['label'], related_entity_label))
     
     # Create a mapping for nodes
     node_map = {node: i for i, node in enumerate(nodes)}
