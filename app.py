@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import tempfile
 from collections import deque
@@ -12,7 +13,6 @@ except ImportError:
     st.stop()
 
 import networkx as nx
-# community detection if desired
 import community as community_louvain  # pip install python-louvain
 from pyvis.network import Network  # pip install pyvis
 
@@ -21,57 +21,70 @@ st.set_page_config(page_title="Knowledge Graph Explorer", layout="wide")
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
-def call_openai(prompt: str) -> list[str]:
+def call_openai_json(prompt: str) -> list:
     """
-    Calls OpenAI and expects a JSON array of strings.
+    Calls the OpenAI API and returns a parsed JSON array.
+    Strips markdown code fences or extra text around JSON.
     """
     try:
         resp = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-        text = resp.choices[0].message.content.strip()
+        text = resp.choices[0].message.content
+        # Remove markdown code fences
+        # match ```json ... ``` or ``` ... ```
+        fenced = re.search(r"```(?:json)?\n([\s\S]*?)```", text)
+        if fenced:
+            text = fenced.group(1)
+        # Otherwise, extract first JSON array
+        if not text.strip().startswith('['):
+            start = text.find('[')
+            end = text.rfind(']')
+            if start != -1 and end != -1:
+                text = text[start:end+1]
+        # Load JSON
         return json.loads(text)
+    except json.JSONDecodeError as jde:
+        st.error(f"Failed to parse JSON response:\n{text}\nError: {jde}")
+        return []
     except Exception as e:
-        st.error(f"OpenAI error or parse failure:\n{text if 'text' in locals() else ''}\n{e}")
+        st.error(f"OpenAI API error:\n{e}")
         return []
 
 
-def extract_relations(concept: str, relation: str, description: str, max_count: int):
+def extract_relations(concept: str, relation: str, description: str, max_count: int) -> list[str]:
     """
-    Extracts related concepts of type 'description' for a given concept.
-    Returns list of related concept names.
+    Extracts related concept names for a given concept and description.
     """
     prompt = (
         f"You are a knowledge graph extractor. List up to {max_count} {description} "
-        f"of '{concept}' as a JSON array of strings."
+        f"of '{concept}' as a JSON array of strings. Only return the array."
     )
-    return call_openai(prompt)
+    return call_openai_json(prompt)
 
 
-def build_graph(seed: str, depth: int = 2, max_count: int = 5):
+def build_graph(seed: str, depth: int = 2, max_count: int = 5) -> nx.DiGraph:
     """
-    Builds a directed graph with two edge types: 'subclass_of' (solid) and 'related_to' (dashed).
-    Only subtopics ('subclass_of') are recursively expanded up to 'depth'.
+    Builds a directed graph with subtopics recursively expanded and related entities.
     """
     G = nx.DiGraph()
-    seen = set([seed])
+    seen = {seed}
     queue = deque([(seed, 0)])
     G.add_node(seed)
 
     while queue:
         node, level = queue.popleft()
-        if level >= depth:
-            continue
-        # 1) subtopics (hierarchical)
-        subs = extract_relations(node, "subclass_of", "subtopics", max_count)
-        for sub in subs:
-            G.add_node(sub)
-            G.add_edge(node, sub, relation="subclass_of")
-            if sub not in seen:
-                seen.add(sub)
-                queue.append((sub, level + 1))
-        # 2) related entities (non-hierarchical)
+        if level < depth:
+            # Subtopics (hierarchical)
+            subs = extract_relations(node, "subclass_of", "subtopics", max_count)
+            for sub in subs:
+                G.add_node(sub)
+                G.add_edge(node, sub, relation="subclass_of")
+                if sub not in seen:
+                    seen.add(sub)
+                    queue.append((sub, level + 1))
+        # Related entities (non-hierarchical)
         rels = extract_relations(node, "related_to", "related entities", max_count)
         for rel in rels:
             G.add_node(rel)
@@ -79,12 +92,11 @@ def build_graph(seed: str, depth: int = 2, max_count: int = 5):
     return G
 
 
-def visualize_graph(G: nx.DiGraph):
+def visualize_graph(G: nx.DiGraph) -> str:
     """
-    Visualizes graph hierarchically with solid edges for 'subclass_of' and dashed for 'related_to'.
+    Renders the graph with hierarchical layout for subtopics and dashed edges for related.
     """
     net = Network(height="700px", width="100%", directed=True)
-    # enable hierarchical layout
     net.set_options(
         """
         var options = {
@@ -94,13 +106,11 @@ def visualize_graph(G: nx.DiGraph):
         """
     )
     for node in G.nodes():
-        # color by whether it's root, subtopic, or related (community optional)
         net.add_node(node, label=node)
     for u, v, data in G.edges(data=True):
-        style = {'dashes': data['relation'] != 'subclass_of'}
-        net.add_edge(u, v, title=data['relation'], **style)
+        dashed = data.get('relation') != 'subclass_of'
+        net.add_edge(u, v, title=data.get('relation', ''), dashes=dashed)
 
-    # write html
     path = tempfile.NamedTemporaryFile(delete=False, suffix=".html").name
     net.show(path)
     with open(path, 'r', encoding='utf-8') as f:
