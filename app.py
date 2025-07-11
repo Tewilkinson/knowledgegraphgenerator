@@ -18,7 +18,6 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
       - rel='related_question': user search questions
     Returns a list of strings.
     """
-    # Construct prompt based on relation
     if rel == "subtopic":
         prompt = (
             f"Provide a JSON array of up to {limit} concise, distinct subtopics "
@@ -50,7 +49,6 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
         arr = json.loads(content)
         return [str(item) for item in arr][:limit]
     except json.JSONDecodeError:
-        # Fallback to line parsing
         items = []
         for line in content.splitlines():
             clean = re.sub(r"^[-•\s]+", "", line).strip()
@@ -106,9 +104,22 @@ var options = {
   "physics": {"enabled": true, "stabilization": {"iterations": 300}}
 }
 """)
-    colors = {"seed": "#1f78b4", "subtopic": "#66c2a5", "related": "#61b2ff", "related_question": "#ffcc61"}
+    # Updated colors and shapes
+    props = {
+        "seed": {"color": "red", "shape": "circle"},
+        "subtopic": {"color": "#66c2a5", "shape": "diamond"},
+        "related": {"color": "#61b2ff", "shape": "circle"},
+        "related_question": {"color": "#61b2ff", "shape": "circle"}
+    }
     for node, data in G.nodes(data=True):
-        net.add_node(node, label=data["label"], title=f"{data['rel']} (depth {data['depth']})", color=colors.get(data['rel'], "#999999"))
+        p = props.get(data["rel"], {"color": "#999999", "shape": "circle"})
+        net.add_node(
+            node,
+            label=data["label"],
+            title=f"{data['rel']} (depth {data['depth']})",
+            color=p["color"],
+            shape=p["shape"]
+        )
     for u, v in G.edges():
         net.add_edge(u, v)
     return net.generate_html()
@@ -139,10 +150,9 @@ if st.sidebar.button("Generate Graph"):
         G = build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q)
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
     st.markdown(
-        "<span style='color:#1f78b4;'>🔵</span>Seed  "
+        "<span style='color:red;'>🔴</span>Seed  "
         "<span style='color:#66c2a5;'>🟢</span>Subtopic  "
-        "<span style='color:#61b2ff;'>🔷</span>Related  "
-        "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
+        "<span style='color:#61b2ff;'>🔵</span>Related & Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
