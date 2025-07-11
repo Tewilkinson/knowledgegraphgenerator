@@ -4,4 +4,4 @@ networkx
 python-louvain
 pyvis
 SPARQLWrapper
-st-cytoscape       # ← add this instead of “streamlit-cytoscape”
+streamlit-cytoscapejs       # ← add this instead of “streamlit-cytoscape”
