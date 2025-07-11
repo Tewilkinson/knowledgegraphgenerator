@@ -1,7 +1,8 @@
 # app.py
 
 import streamlit as st
-import requests, re, csv, os
+import requests, re, csv, os, io
+import pandas as pd
 import networkx as nx
 from pyvis.network import Network
 from SPARQLWrapper import SPARQLWrapper, JSON
@@ -72,7 +73,8 @@ def get_wikidata_relations(qid: str, preds: list[str]):
           r["p"]["value"].split("/")[-1],
           r["pLabel"]["value"],
           r["objLabel"]["value"]
-        ) for r in rows
+        )
+        for r in rows
     ]
 
 @st.cache_data
@@ -82,8 +84,10 @@ def get_conceptnet_related(term: str, limit: int=20):
         f"https://api.conceptnet.io/related/c/en/{uri}",
         params={"filter":"/c/en","limit":limit}, timeout=5
     ); r.raise_for_status()
-    return [ e["@id"].split("/")[-1].replace("_"," ")
-             for e in r.json().get("related", []) ]
+    return [
+        e["@id"].split("/")[-1].replace("_"," ")
+        for e in r.json().get("related", [])
+    ]
 
 @st.cache_data
 def get_gpt_related(term: str, limit: int=10):
@@ -94,31 +98,32 @@ def get_gpt_related(term: str, limit: int=10):
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-          {"role":"system","content":"You are a helpful assistant."},
-          {"role":"user","content":prompt}
+            {"role":"system","content":"You are a helpful assistant."},
+            {"role":"user","content":prompt}
         ],
         temperature=0.7
     )
     out = []
     for ln in resp.choices[0].message.content.splitlines():
         clean = re.sub(r"^[-•\s]+","", ln.strip())
-        if clean: out.append(clean)
+        if clean:
+            out.append(clean)
     return out
 
 @st.cache_data
 def classify_edge_with_gpt(parent: str, child: str) -> str:
     prompt = (
-        f"Given **{parent}** and a candidate subtopic **{child}**, "
-        "is this a **subtopic** or merely **related**? "
+        f"Given a domain concept **{parent}** and a candidate subtopic **{child}**, "
+        "should this be classified as a subtopic or merely related? "
         "Answer one word: subtopic or related."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-          {"role":"system","content":"You are a precise classifier."},
-          {"role":"user","content":prompt}
+            {"role":"system","content":"You are a precise classifier."},
+            {"role":"user","content":prompt}
         ],
-        temperature=0.0
+        temperature=0.0,
     )
     ans = resp.choices[0].message.content.strip().lower()
     return "hierarchy" if "subtopic" in ans else "association"
@@ -128,7 +133,7 @@ def load_custom_hierarchy(csv_path="custom_hierarchy.csv"):
     if os.path.exists(csv_path):
         with open(csv_path, newline="") as f:
             for row in csv.reader(f):
-                if len(row)>=2:
+                if len(row) >= 2:
                     edges.append((row[0].strip(), row[1].strip()))
     return edges
 
@@ -141,13 +146,13 @@ def build_graph():
     G.add_node(seed, label=seed, rel="seed", depth=0)
 
     # Custom overrides
-    for p,c in custom:
-        if not G.has_node(p):
-            G.add_node(p, label=p, rel="seed", depth=0)
-        G.add_node(c, label=c, rel="custom", depth=1)
-        G.add_edge(p, c)
+    for parent, child in custom:
+        if not G.has_node(parent):
+            G.add_node(parent, label=parent, rel="seed", depth=0)
+        G.add_node(child, label=child, rel="custom", depth=1)
+        G.add_edge(parent, child)
 
-    # Wikidata
+    # Wikidata relations
     qid = lookup_qid(seed)
     if qid:
         wrels = get_wikidata_relations(
@@ -163,7 +168,7 @@ def build_graph():
             G.add_node(obj_lbl, label=obj_lbl, rel=rtype, depth=1)
             G.add_edge(seed, obj_lbl)
 
-    # ConceptNet
+    # ConceptNet neighbours
     sems = get_conceptnet_related(seed, sem_lim)
     for lbl in sems:
         G.add_node(lbl, label=lbl, rel="related", depth=1)
@@ -174,19 +179,19 @@ def build_graph():
         G.add_node(qry, label=qry, rel="gpt_seed", depth=1)
         G.add_edge(seed, qry)
 
-    # GPT on each related/association/custom
+    # GPT on each related/association/custom node
     nodes_list = list(G.nodes())
     for node in nodes_list:
         data = G.nodes[node]
         if data.get("rel") in ("related", "association", "custom"):
             for sub in get_gpt_related(node, gpt_rel):
                 G.add_node(sub, label=sub, rel="gpt_related",
-                           depth=data.get("depth",0)+1)
+                           depth=data.get("depth", 0) + 1)
                 G.add_edge(node, sub)
 
     return G
 
-# ─── 5. RENDER WITH PYVIS ─────────────────────────────────────────────────
+# ─── 5. RENDER & EXPORT ─────────────────────────────────────────────────
 def draw_pyvis(G):
     net = Network(height="750px", width="100%", notebook=False)
     color_map = {
@@ -205,7 +210,7 @@ def draw_pyvis(G):
             title=f"{data['rel']} (depth {data['depth']})",
             color=color_map.get(data.get("rel"), "#ccc")
         )
-    for u,v in G.edges():
+    for u, v in G.edges():
         net.add_edge(u, v)
     net.show_buttons(filter_=['physics'])
     return net.generate_html()
@@ -215,5 +220,42 @@ if build:
     with st.spinner("Building enhanced knowledge graph…"):
         G = build_graph()
     st.success(f"✅ Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
+
+    # --- Export to Excel ---
+    nodes = [
+        {
+            "node_id": nid,
+            "label": data.get("label",""),
+            "rel": data.get("rel",""),
+            "depth": data.get("depth",0)
+        }
+        for nid, data in G.nodes(data=True)
+    ]
+    df_nodes = pd.DataFrame(nodes)
+
+    edges = [
+        {
+            "source": u,
+            "target": v,
+            "predicate": ""  # no predicate field stored
+        }
+        for u, v in G.edges()
+    ]
+    df_edges = pd.DataFrame(edges)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df_nodes.to_excel(writer, sheet_name="nodes", index=False)
+        df_edges.to_excel(writer, sheet_name="edges", index=False)
+    output.seek(0)
+
+    st.download_button(
+        label="💾 Download graph as Excel",
+        data=output,
+        file_name="knowledge_graph.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    # --- End export ---
+
     html = draw_pyvis(G)
     st.components.v1.html(html, height=800, scrolling=True)
