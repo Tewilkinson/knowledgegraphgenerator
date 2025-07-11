@@ -4,3 +4,4 @@ streamlit
 openai
 networkx
 pyvis
+openpyxl
