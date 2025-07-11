@@ -9,29 +9,33 @@ from pyvis.network import Network
 import requests
 import re
 
-# --- 1. CONFIG ---
+# ─── 1. CONFIG ─────────────────────────────────────────
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
-WIKIDATA_SEARCH_API = "https://www.wikidata.org/w/api.php"
+WIKIDATA_SPARQL    = "https://query.wikidata.org/sparql"
+WIKIDATA_SEARCH_API= "https://www.wikidata.org/w/api.php"
 
-# --- 2. QID LOOKUP ---
-@st.cache_data(show_spinner=False)
+# Fixed depth & GPT subtopics per node
+MAX_DEPTH = 4
+GPT_TOPICS = 5
+
+# ─── 2. QID LOOKUP ─────────────────────────────────────
+@st.cache_data
 def search_qid(label: str) -> str | None:
-    resp = requests.get(
+    r = requests.get(
         WIKIDATA_SEARCH_API,
         params={
-            "action": "wbsearchentities",
+            "action":"wbsearchentities",
             "search": label,
-            "language": "en",
-            "format": "json",
-            "limit": 1
+            "language":"en",
+            "format":"json",
+            "limit":1
         }
     ).json()
-    hits = resp.get("search", [])
+    hits = r.get("search", [])
     return hits[0]["id"] if hits else None
 
-# --- 3. WIKIDATA RELATIONS ---
-@st.cache_data(show_spinner=False)
+# ─── 3. FETCH WIKIDATA RELATIONS ────────────────────────
+@st.cache_data
 def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,str,str]]:
     sparql = SPARQLWrapper(WIKIDATA_SPARQL)
     preds = " ".join(f"wdt:{p}" for p in predicates)
@@ -43,45 +47,42 @@ def fetch_wikidata_relations(qid: str, predicates: list[str]) -> list[tuple[str,
       }}
     """)
     sparql.setReturnFormat(JSON)
-    data = sparql.query().convert()["results"]["bindings"]
+    rows = sparql.query().convert()["results"]["bindings"]
     return [
         (
-            b["pLabel"]["value"],
-            b["obj"]["value"].rsplit("/", 1)[-1],
-            b["objLabel"]["value"]
+          b["pLabel"]["value"],
+          b["obj"]["value"].rsplit("/",1)[-1],
+          b["objLabel"]["value"]
         )
-        for b in data
+        for b in rows
     ]
 
-# --- 4. GPT “RELATED SUBTOPICS” ---
-@st.cache_data(show_spinner=False)
-def get_related_topics(label: str, n: int = 5) -> list[str]:
+# ─── 4. GPT “RELATED SUBTOPICS” ─────────────────────────
+@st.cache_data
+def get_related_topics(label: str, n: int=GPT_TOPICS) -> list[str]:
     prompt = (
         f"List {n} DISTINCT, concise subtopics of “{label}” "
-        "as a bullet list, each on its own line. "
-        "Return ONLY the subtopic names."
+        "as a bullet list. Return ONLY the subtopic names."
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
+          {"role":"system","content":"You are a helpful assistant."},
+          {"role":"user","content":prompt}
         ],
         temperature=0.7,
     )
     text = resp.choices[0].message.content
-    lines = []
+    out = []
     for ln in text.splitlines():
         ln = ln.strip()
-        if not ln:
-            continue
-        clean = re.sub(r"^[-•\d\.\)\s]+", "", ln)
-        if clean:
-            lines.append(clean)
-    return lines
+        if not ln: continue
+        clean = re.sub(r"^[-•\d\.\)\s]+","",ln)
+        if clean: out.append(clean)
+    return out
 
-# --- 5. OPENAI EMBEDDINGS ---
-@st.cache_data(show_spinner=False)
+# ─── 5. EMBEDDINGS (for future clustering if desired) ────
+@st.cache_data
 def get_embedding(text: str) -> np.ndarray:
     resp = openai_client.embeddings.create(
         model="text-embedding-3-small",
@@ -89,97 +90,79 @@ def get_embedding(text: str) -> np.ndarray:
     )
     return np.array(resp.data[0].embedding)
 
-# --- 6. GRAPH EXPANSION ---
+# ─── 6. RECURSIVE EXPANSION ─────────────────────────────
 def expand_node(
     G: nx.DiGraph,
     qid: str,
     label: str,
-    depth: int,
-    max_depth: int,
-    subtopics_per_node: int
+    depth: int
 ):
+    # avoid repeats
     if G.has_node(qid):
         return
 
-    # Add node metadata
+    # store label & depth
     G.add_node(qid, label=label, depth=depth)
 
-    # Stop if at max depth
-    if depth >= max_depth:
+    # stop if max depth
+    if depth >= MAX_DEPTH:
         return
 
-    # 1) Wikidata relations
+    # 1) Wikidata edges
     for pred, obj_qid, obj_label in fetch_wikidata_relations(
-        qid, predicates=["P279", "P31", "P361"]
+        qid, predicates=["P279","P31","P361"]
     ):
         G.add_edge(qid, obj_qid, predicate=pred)
-        expand_node(G, obj_qid, obj_label, depth + 1, max_depth, subtopics_per_node)
+        expand_node(G, obj_qid, obj_label, depth+1)
 
-    # 2) GPT “related_to” subtopics
-    for sub in get_related_topics(label, n=subtopics_per_node):
+    # 2) GPT subtopics
+    for sub in get_related_topics(label):
         sub_qid = search_qid(sub)
-        if not sub_qid:
-            continue
-        G.add_edge(qid, sub_qid, predicate="related_to")
-        expand_node(G, sub_qid, sub, depth + 1, max_depth, subtopics_per_node)
+        # If we got a QID, link; if not, still create a node with a synthetic ID
+        node_id = sub_qid or f"GPT:{sub}"
+        G.add_node(node_id, label=sub, depth=depth+1)
+        G.add_edge(qid, node_id, predicate="related_to")
+        expand_node(G, node_id, sub, depth+1)
 
-# --- 7. VISUALIZATION WITH PYVIS ---
+# ─── 7. RENDER WITH PYVIS ────────────────────────────────
 def draw_pyvis(G: nx.DiGraph) -> str:
-    net = Network(height="650px", width="100%", notebook=False)
-
-    # Safely compute max depth
-    depths = [data.get("depth", 0) for _, data in G.nodes(data=True)]
+    net = Network(height="700px", width="100%", notebook=False)
+    # safe max depth
+    depths = [d.get("depth",0) for _,d in G.nodes(data=True)]
     maxd = max(depths) if depths else 0
 
-    # Add nodes
-    for node_id, data in G.nodes(data=True):
-        d = data.get("depth", 0)
-        lbl = data.get("label", node_id)
-        # color by depth
-        r = int(255 * d / maxd) if maxd else 0
-        g = int(200 * (maxd - d) / maxd) if maxd else 200
-        color = f"rgba({r}, {g}, 150, 0.8)"
-        net.add_node(
-            node_id,
-            label=lbl,
-            title=f"Depth: {d}",
-            color=color
-        )
+    for nid, data in G.nodes(data=True):
+        d = data.get("depth",0)
+        lbl = data.get("label",nid)
+        # color gradient by depth
+        r = int(255 * d/(maxd or 1))
+        g = int(200 * (maxd-d)/(maxd or 1))
+        net.add_node(nid, label=lbl, title=f"Depth: {d}",
+                     color=f"rgba({r},{g},150,0.8)")
 
-    # Add edges
-    for u, v, data in G.edges(data=True):
-        net.add_edge(u, v, title=data.get("predicate", ""))
+    for u,v,data in G.edges(data=True):
+        net.add_edge(u,v,title=data.get("predicate",""))
 
-    net.show_buttons(filter_=["physics"])
+    net.show_buttons(filter_=['physics'])
     return net.generate_html()
 
-# --- 8. STREAMLIT UI ---
+# ─── 8. STREAMLIT UI ─────────────────────────────────────
 st.set_page_config(layout="wide")
 st.title("🔎 Deep Interactive Wikidata Knowledge Graph")
 
-with st.sidebar:
-    seed = st.text_input("Seed entity", value="data warehouse")
-    max_depth = st.slider("Max crawl depth", 1, 5, 3)
-    subtopics_per_node = st.slider("GPT subtopics/node", 1, 8, 5)
-    build = st.button("🔍 Build Graph")
+seed = st.text_input("🔍 Seed entity", value="data warehouse")
+if st.button("Build Deep Graph"):
+    # 1) find root QID
+    qid = search_qid(seed)
+    if not qid:
+        st.error(f"No match on Wikidata for “{seed}”")
+        st.stop()
 
-if build:
-    with st.spinner("Resolving QID…"):
-        root_qid = search_qid(seed)
-    if not root_qid:
-        st.error(f"No QID found for “{seed}”. Try another term.")
-    else:
-        st.success(f"Found QID: {root_qid}")
-        G = nx.DiGraph()
-        with st.spinner("Expanding graph…"):
-            expand_node(
-                G,
-                root_qid,
-                seed,
-                depth=0,
-                max_depth=max_depth,
-                subtopics_per_node=subtopics_per_node
-            )
-        st.info(f"Nodes: {len(G.nodes)} | Edges: {len(G.edges)}")
-        html = draw_pyvis(G)
-        st.components.v1.html(html, height=750, scrolling=True)
+    st.success(f"Resolved “{seed}” → {qid}")
+    G = nx.DiGraph()
+    with st.spinner("Expanding… this may take a moment"]:
+        expand_node(G, qid, seed, depth=0)
+
+    st.info(f"🚀 Built graph with {len(G.nodes)} nodes and {len(G.edges)} edges.")
+    html = draw_pyvis(G)
+    st.components.v1.html(html, height=750, scrolling=True)
