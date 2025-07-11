@@ -19,7 +19,7 @@ st.title("🔎 Deep Interactive Wikidata Knowledge Graph")
 
 with st.sidebar:
     seed       = st.text_input("Seed entity", "data warehouse")
-    max_depth  = st.slider("Max crawl depth", 1, 5, 5)       # default to deepest
+    max_depth  = st.slider("Max crawl depth", 1, 5, 5)
     gpt_topics = st.slider("GPT topics/node", 1, 30, 10)
     build      = st.button("Build Graph")
 
@@ -52,8 +52,7 @@ def search_qid(label: str) -> str | None:
             timeout=5
         )
         r.raise_for_status()
-        data = r.json()
-        hits = data.get("search", [])
+        hits = r.json().get("search", [])
         if hits:
             return hits[0]["id"]
     except Exception:
@@ -125,7 +124,6 @@ def get_related_topics(label: str, n: int) -> list[str]:
 
 # ─── 4. GRAPH EXPANSION ────────────────────────────────────
 def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
-    # Avoid re-adding
     if G.has_node(qid):
         return
 
@@ -135,7 +133,7 @@ def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
     if depth >= max_depth:
         return
 
-    # 4A) Wikidata edges
+    # Wikidata edges
     if source == "wikidata":
         for prop, obj_q, obj_lbl in fetch_wikidata_relations(
             qid, ["P279","P31","P361"]
@@ -143,10 +141,10 @@ def expand_node(G: nx.DiGraph, qid: str, label: str, depth: int):
             G.add_edge(qid, obj_q, predicate=prop)
             expand_node(G, obj_q, obj_lbl, depth+1)
 
-    # 4B) GPT “related_to”
+    # GPT “related_to” edges
     for sub in get_related_topics(label, gpt_topics):
         sub_q = search_qid(sub)
-        node_id = sub_q or f"GPT:" + sub
+        node_id = sub_q or f"GPT:{sub}"
         G.add_edge(qid, node_id, predicate="related_to")
         expand_node(G, node_id, sub, depth+1)
 
@@ -155,9 +153,10 @@ def draw_pyvis(G: nx.DiGraph) -> str:
     net = Network(height="700px", width="100%", notebook=False)
 
     for nid, data in G.nodes(data=True):
-        lbl   = data.get("label", nid)
-        color = "#66c2a5" if data["source"]=="wikidata" else "#fc8d62"
-        title = f"{lbl} (depth {data['depth']})"
+        lbl    = data.get("label", nid)
+        src    = data.get("source", "wikidata")
+        color  = "#66c2a5" if src == "wikidata" else "#fc8d62"
+        title  = f"{lbl} (depth {data.get('depth', 0)})"
         net.add_node(nid, label=lbl, title=title, color=color)
 
     for u, v, d in G.edges(data=True):
@@ -172,12 +171,12 @@ if build:
         root = search_qid(seed)
 
     if not root:
-        st.error(f"❌ No Wikidata match for “{seed}”. Try another term.")
+        st.error(f"❌ No Wikidata match for “{seed}”.")
         st.stop()
 
     st.success(f"✅ Seed → QID {root}")
     G = nx.DiGraph()
-    with st.spinner("Expanding graph (this may take a minute)…"):
+    with st.spinner("Expanding graph… this may take a while"):
         expand_node(G, root, seed, depth=0)
 
     st.info(f"🚀 Graph built: {len(G.nodes)} nodes, {len(G.edges)} edges.")
