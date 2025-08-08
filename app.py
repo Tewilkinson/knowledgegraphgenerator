@@ -193,16 +193,14 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    # Wrap in full-viewport div to break out of container
-    html_wrapped = f"""
-    <div style="position:relative; left:50%; margin-left:-50vw; width:100vw;">
-        {html}
-    </div>
-    """
+    # Display graph in a wide center column layout
+_, graph_col, _ = st.columns([0.1, 4, 0.1])
+with graph_col:
     st.components.v1.html(
-        html_wrapped,
+        html,
         height=800,
-        scrolling=True
+        scrolling=True,
+        width=None
     )
 
     # Export graph data to CSV
