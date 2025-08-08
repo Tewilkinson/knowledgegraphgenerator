@@ -12,6 +12,25 @@ from pytrends.request import TrendReq
 openai_client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 pytrends = TrendReq(hl='en-US', tz=360)
 
+# ─── STREAMLIT PAGE SETUP ──────────────────────────────
+st.set_page_config(layout="wide")
+# Inject CSS to allow full-width containers and iframes
+st.markdown(
+    '''
+    <style>
+      .block-container {
+        max-width: 100% !important;
+        padding-left: 1rem;
+        padding-right: 1rem;
+      }
+      iframe[srcdoc] {
+        width: 100% !important;
+      }
+    </style>
+    ''',
+    unsafe_allow_html=True
+)
+
 # ─── HELPERS ────────────────────────────────────────────
 @st.cache_data
 def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
@@ -52,6 +71,7 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
             if clean:
                 items.append(clean)
         return items[:limit]
+
 
 def get_topic_trend(keyword):
     try:
@@ -137,7 +157,6 @@ var options = {
     return net.generate_html()
 
 # ─── STREAMLIT UI ────────────────────────────────────────
-st.set_page_config(layout="wide")
 st.title("LLM-driven Knowledge Graph Generator")
 
 with st.sidebar:
@@ -167,9 +186,15 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    st.components.v1.html(html, height=800, scrolling=True)
+    # Embed at full container width
+    st.components.v1.html(
+        html,
+        height=800,
+        scrolling=True,
+        width=None
+    )
 
-    # Export graph data to Excel
+    # Export graph data to CSV
     nodes_data = []
     for _, data in G.nodes(data=True):
         nodes_data.append({
