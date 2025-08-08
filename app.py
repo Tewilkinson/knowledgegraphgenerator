@@ -41,8 +41,10 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
         return []
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[{"role": "system", "content": "Output only a JSON array of strings."},
-                  {"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "Output only a JSON array of strings."},
+            {"role": "user", "content": prompt}
+        ],
         temperature=0.7
     )
     content = resp.choices[0].message.content
@@ -53,6 +55,25 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
         return [re.sub(r"^[-•\s]+", "", l).strip() for l in content.splitlines() if l][:limit]
 
 @st.cache_data
+def find_parent_topics(topic: str, limit: int = 5) -> list[str]:
+    prompt = (
+        f"Provide a JSON array of up to {limit} higher-level topics or domains that '{topic}' is a subtopic of."
+    )
+    resp = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "Output only a JSON array of strings."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0
+    )
+    try:
+        arr = json.loads(resp.choices[0].message.content)
+        return [str(p) for p in arr][:limit]
+    except:
+        return []
+
+@st.cache_data
 def find_parent_topic_weights(topic: str, candidates: list[str]) -> pd.DataFrame:
     prompt = (
         f"For the topic '{topic}', assign a relevance score from 0 to 100 to each of the following higher-level domains: "
@@ -60,8 +81,10 @@ def find_parent_topic_weights(topic: str, candidates: list[str]) -> pd.DataFrame
     )
     resp = openai_client.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[{"role": "system", "content": "Output only valid JSON."},
-                  {"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": "Output only valid JSON."},
+            {"role": "user", "content": prompt}
+        ],
         temperature=0
     )
     try:
@@ -103,7 +126,6 @@ def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q
 # ─── VISUALIZE WITH PYVIS ───────────────────────────────
 def draw_pyvis(G: nx.Graph) -> str:
     net = Network(height="750px", width="100%", notebook=False)
-    # Use valid JSON for options
     options_json = json.dumps({
         "interaction": {"hover": True, "navigationButtons": True},
         "physics": {"stabilization": {"iterations": 300}}
@@ -120,7 +142,7 @@ def draw_pyvis(G: nx.Graph) -> str:
 # ─── STREAMLIT APP UI ──────────────────────────────────
 st.title("LLM-driven Knowledge Graph & Parent Topic Weigher")
 
-tab1, tab2 = st.tabs(["Knowledge Graph","Parent Topic Weigher"])
+tab1, tab2 = st.tabs(["Knowledge Graph","Bulk Parent Topic Weigher"])
 
 with tab1:
     with st.sidebar:
@@ -145,17 +167,21 @@ with tab1:
         st.download_button("Download CSV", df.to_csv(index=False), "graph.csv", "text/csv")
 
 with tab2:
-    st.header("Parent Topic Weigher")
-    topic = st.text_input("Topic to weigh", "etl process")
-    candidates = st.text_area(
-        "Candidate parents (comma-separated)",
-        value="Data Engineering, Data Integration, Data Warehousing, Business Intelligence, Data Management"
-    ).split(",")
-    candidates = [c.strip() for c in candidates if c.strip()]
+    st.header("Bulk Parent Topic Weigher")
+    topics_input = st.text_area("Enter topics (one per line)", "etl process")
+    topics = [t.strip() for t in topics_input.splitlines() if t.strip()]
     if st.button("Compute Weights"):
-        with st.spinner("Scoring..."):
-            weights_df = find_parent_topic_weights(topic, candidates)
-        st.bar_chart(weights_df.set_index('parent')['score'])
-        top = weights_df.iloc[0]
-        st.markdown(f"**Top fit:** '{topic}' is most strongly a subtopic of **{top['parent']}** (score {top['score']}).")
-        st.dataframe(weights_df)
+        results = []
+        for topic in topics:
+            parents = find_parent_topics(topic)
+            if parents:
+                weights_df = find_parent_topic_weights(topic, parents)
+                sorted_parents = list(weights_df['parent'])
+            else:
+                sorted_parents = []
+            row = {'Topic': topic}
+            for i, p in enumerate(sorted_parents, start=1):
+                row[f'Parent {i}'] = p
+            results.append(row)
+        out_df = pd.DataFrame(results)
+        st.dataframe(out_df)
