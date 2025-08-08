@@ -5,7 +5,6 @@ from pyvis.network import Network
 from openai import OpenAI
 import json
 import pandas as pd
-import io
 from pytrends.request import TrendReq
 
 # ─── CONFIG ────────────────────────────────────────────
@@ -14,16 +13,18 @@ pytrends = TrendReq(hl='en-US', tz=360)
 
 # ─── STREAMLIT PAGE SETUP ──────────────────────────────
 st.set_page_config(layout="wide")
-# Inject CSS to allow full-width containers and iframes
+# Inject CSS to lift width constraints
 st.markdown(
     '''
     <style>
+      /* Ensure block container spans full width */
       .block-container {
         max-width: 100% !important;
         padding-left: 1rem;
         padding-right: 1rem;
       }
-      iframe[srcdoc] {
+      /* Target all iframes to fill parent */
+      iframe {
         width: 100% !important;
       }
     </style>
@@ -186,12 +187,16 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    # Embed at full container width
+    # Wrap in full-viewport div to break out of container
+    html_wrapped = f"""
+    <div style="position:relative; left:50%; margin-left:-50vw; width:100vw;">
+        {html}
+    </div>
+    """
     st.components.v1.html(
-        html,
+        html_wrapped,
         height=800,
-        scrolling=True,
-        width=None
+        scrolling=True
     )
 
     # Export graph data to CSV
@@ -213,3 +218,4 @@ if st.sidebar.button("Generate Graph"):
         file_name=f"{seed.replace(' ', '_')}_knowledge_graph.csv",
         mime="text/csv"
     )
+
