@@ -54,10 +54,6 @@ def get_llm_neighbors(term: str, rel: str, limit: int) -> list[str]:
 
 @st.cache_data
 def find_parent_topic_weights(topic: str, candidates: list[str]) -> pd.DataFrame:
-    """
-    Given a topic and list of candidate parent topics, ask the LLM to score each candidate
-    by relevance 0-100. Returns a DataFrame with columns ['parent','score'].
-    """
     prompt = (
         f"For the topic '{topic}', assign a relevance score from 0 to 100 to each of the following higher-level domains: "
         f"{', '.join(candidates)}. Respond only as JSON array of objects with 'parent' and 'score' fields."
@@ -74,38 +70,54 @@ def find_parent_topic_weights(topic: str, candidates: list[str]) -> pd.DataFrame
         df['score'] = pd.to_numeric(df['score'], errors='coerce').fillna(0).astype(int)
         return df.sort_values('score', ascending=False).reset_index(drop=True)
     except Exception:
-        # fallback: equal weighting
         df = pd.DataFrame({'parent': candidates, 'score': [100//len(candidates)]*len(candidates)})
         return df.sort_values('score', ascending=False).reset_index(drop=True)
 
-# ─── GRAPH & VISUALS ───────────────────────────────────
+# ─── GRAPH BUILDER ──────────────────────────────────────
 def build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q):
-    G = nx.Graph(); G.add_node(seed, label=seed, rel="seed", depth=0)
-    for t in get_llm_neighbors(seed, "subtopic", max_sub): G.add_node(t,label=t,rel="subtopic",depth=1); G.add_edge(seed,t)
-    if sub_depth>1:
-        for t in list(G.nodes):
-            if G.nodes[t]['rel']=='subtopic':
-                for t2 in get_llm_neighbors(t, "subtopic", max(1, max_sub//2)):
-                    if not G.has_node(t2): G.add_node(t2,label=t2,rel="subtopic",depth=G.nodes[t]['depth']+1)
-                    G.add_edge(t,t2)
-    for c in get_llm_neighbors(seed, "related", max_rel):
-        G.add_node(c,label=c,rel="related",depth=1); G.add_edge(seed,c)
-        for sr in get_llm_neighbors(c, "related", sem_sub_lim):
-            if not G.has_node(sr): G.add_node(sr,label=sr,rel="related",depth=2)
-            G.add_edge(c,sr)
+    G = nx.Graph()
+    G.add_node(seed, label=seed, rel="seed", depth=0)
+    for t in get_llm_neighbors(seed, "subtopic", max_sub):
+        G.add_node(t, label=t, rel="subtopic", depth=1)
+        G.add_edge(seed, t)
+    if sub_depth > 1:
+        for node in list(G.nodes):
+            if G.nodes[node]['rel'] == 'subtopic':
+                for sub in get_llm_neighbors(node, "subtopic", max(1, max_sub//2)):
+                    if not G.has_node(sub):
+                        G.add_node(sub, label=sub, rel="subtopic", depth=G.nodes[node]['depth']+1)
+                    G.add_edge(node, sub)
+    for rel in get_llm_neighbors(seed, "related", max_rel):
+        G.add_node(rel, label=rel, rel="related", depth=1)
+        G.add_edge(seed, rel)
+        for subr in get_llm_neighbors(rel, "related", sem_sub_lim):
+            if not G.has_node(subr):
+                G.add_node(subr, label=subr, rel="related", depth=2)
+            G.add_edge(rel, subr)
     if include_q:
-        for q in get_llm_neighbors(seed, "related_question", max_q): G.add_node(q,label=q,rel="related_question",depth=1); G.add_edge(seed,q)
+        for q in get_llm_neighbors(seed, "related_question", max_q):
+            G.add_node(q, label=q, rel="related_question", depth=1)
+            G.add_edge(seed, q)
     return G
 
+# ─── VISUALIZE WITH PYVIS ───────────────────────────────
 def draw_pyvis(G: nx.Graph) -> str:
     net = Network(height="750px", width="100%", notebook=False)
-    net.set_options("""var options={interaction:{hover:true,navigationButtons:true},physics:{stabilization:{iterations:300}}}""")
-    cols={"seed":"#1f78b4","subtopic":"#66c2a5","related":"#61b2ff","related_question":"#ffcc61"}
-    for n,d in G.nodes(data=True): net.add_node(n,label=d['label'],title=f"{d['rel']} (depth {d['depth']})",color=cols.get(d['rel'],"#999"))
-    for u,v in G.edges(): net.add_edge(u,v)
+    # Use valid JSON for options
+    options_json = json.dumps({
+        "interaction": {"hover": True, "navigationButtons": True},
+        "physics": {"stabilization": {"iterations": 300}}
+    })
+    net.set_options(options_json)
+    colors = {"seed": "#1f78b4", "subtopic": "#66c2a5", "related": "#61b2ff", "related_question": "#ffcc61"}
+    for node, data in G.nodes(data=True):
+        title = f"{data['rel']} (depth {data['depth']})"
+        net.add_node(node, label=data['label'], title=title, color=colors.get(data['rel'], "#999999"))
+    for u, v in G.edges():
+        net.add_edge(u, v)
     return net.generate_html()
 
-# ─── APP UI ─────────────────────────────────────────────
+# ─── STREAMLIT APP UI ──────────────────────────────────
 st.title("LLM-driven Knowledge Graph & Parent Topic Weigher")
 
 tab1, tab2 = st.tabs(["Knowledge Graph","Parent Topic Weigher"])
@@ -113,17 +125,17 @@ tab1, tab2 = st.tabs(["Knowledge Graph","Parent Topic Weigher"])
 with tab1:
     with st.sidebar:
         st.header("Graph Controls")
-        seed = st.text_input("Seed topic","data warehouse")
-        max_sub = st.slider("Max subtopics",5,50,20)
-        max_rel = st.slider("Max related",5,50,20)
-        include_q = st.checkbox("Include questions",True)
+        seed = st.text_input("Seed topic", "data warehouse")
+        max_sub = st.slider("Max subtopics", 5, 50, 20)
+        max_rel = st.slider("Max related", 5, 50, 20)
+        include_q = st.checkbox("Include questions", True)
         show_adv = st.checkbox("Advanced settings")
         if show_adv:
-            sub_depth = st.slider("Subtopic depth",1,2,1)
-            max_q = st.slider("# questions",5,50,20)
-            sem_sub_lim = st.slider("2nd level related",0,max_rel,max_rel//2)
+            sub_depth = st.slider("Subtopic depth", 1, 2, 1)
+            max_q = st.slider("# questions", 5, 50, 20)
+            sem_sub_lim = st.slider("2nd level related", 0, max_rel, max_rel//2)
         else:
-            sub_depth, max_q, sem_sub_lim = 1,20,max_rel//2
+            sub_depth, max_q, sem_sub_lim = 1, 20, max_rel//2
     if st.sidebar.button("Generate Graph"):
         G = build_graph(seed, sub_depth, max_sub, max_rel, sem_sub_lim, include_q, max_q)
         st.success(f"Nodes: {len(G.nodes)}   Edges: {len(G.edges)}")
@@ -134,7 +146,7 @@ with tab1:
 
 with tab2:
     st.header("Parent Topic Weigher")
-    topic = st.text_input("Topic to weigh","etl process")
+    topic = st.text_input("Topic to weigh", "etl process")
     candidates = st.text_area(
         "Candidate parents (comma-separated)",
         value="Data Engineering, Data Integration, Data Warehousing, Business Intelligence, Data Management"
