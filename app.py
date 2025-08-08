@@ -193,32 +193,31 @@ if st.sidebar.button("Generate Graph"):
         "<span style='color:#ffcc61;'>🟠</span>Questions", unsafe_allow_html=True
     )
     html = draw_pyvis(G)
-    # Display graph in a wide center column layout (minus sidebar)
-    _, graph_col, _ = st.columns([0.05, 0.9, 0.05])
-    with graph_col:
-        st.components.v1.html(
-            html,
-            height=800,
-            scrolling=True,
-            width=None
-        )
-
-        # Export graph data to CSV
-        nodes_data = []
-        for _, data in G.nodes(data=True):
-            nodes_data.append({
-                "Topic": data["label"],
-                "Type": data["rel"],
-                "Depth": data["depth"],
-                "Search Volume": data.get("volume", ""),
-                "YoY Change (%)": data.get("yoy", ""),
-                "3mo Trend": data.get("3mo_trend", "")
-            })
-        df = pd.DataFrame(nodes_data)
-        csv_data = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Topics as CSV",
-            data=csv_data,
-            file_name=f"{seed.replace(' ', '_')}_knowledge_graph.csv",
-            mime="text/csv"
-        )
+    # Display graph in full main area (excluding sidebar)
+graph_container = st.container()
+with graph_container:
+    st.components.v1.html(
+        html,
+        height=800,
+        scrolling=True,
+        width=None
+    )
+    # Export graph data to CSV
+    nodes_data = []
+    for _, data in G.nodes(data=True):
+        nodes_data.append({
+            "Topic": data["label"],
+            "Type": data["rel"],
+            "Depth": data["depth"],
+            "Search Volume": data.get("volume", ""),
+            "YoY Change (%)": data.get("yoy", ""),
+            "3mo Trend": data.get("3mo_trend", "")
+        })
+    df = pd.DataFrame(nodes_data)
+    csv_data = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Topics as CSV",
+        data=csv_data,
+        file_name=f"{seed.replace(' ', '_')}_knowledge_graph.csv",
+        mime="text/csv"
+    )
