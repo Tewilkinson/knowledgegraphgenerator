@@ -13,21 +13,16 @@ pytrends = TrendReq(hl='en-US', tz=360)
 
 # ─── STREAMLIT PAGE SETUP ──────────────────────────────
 st.set_page_config(layout="wide")
-# Inject CSS to force full-viewport width for main container and HTML component
+# Inject CSS to force full-viewport width for main container (if classes differ, fallback to explicit width)
 st.markdown(
     """
     <style>
       /* Ensure the main container truly spans full browser width */
-      .stApp .css-1d391kg {
+      .stApp .css-1d391kg, .stApp [data-testid="stAppViewContainer"] {
         max-width: 100vw !important;
         width: 100vw !important;
         padding-left: 0 !important;
         padding-right: 0 !important;
-      }
-      /* Remove default padding on the section */
-      section.main {
-        padding: 0 !important;
-        margin: 0 !important;
       }
       /* Force any iframe (e.g. PyVis) to fill its parent */
       iframe {
@@ -207,7 +202,7 @@ if st.sidebar.button("Generate Graph"):
             html,
             height=800,
             scrolling=True,
-            width=None  # CSS forces full viewport width
+            width=2000  # explicitly large width to ensure full-bleed
         )
         # Export graph data to CSV
         nodes_data = []
