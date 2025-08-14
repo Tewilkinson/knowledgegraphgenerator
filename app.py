@@ -140,7 +140,7 @@ def draw_pyvis(G: nx.Graph) -> str:
     return net.generate_html()
 
 # ─── STREAMLIT APP UI ──────────────────────────────────
-st.title("LLM-driven Knowledge Graph & Parent Topic Weigher")
+st.title("Knowledge Graph Generator")
 
 tab1, tab2 = st.tabs(["Knowledge Graph","Bulk Parent Topic Weigher"])
 
