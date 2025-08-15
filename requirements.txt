@@ -5,4 +5,4 @@ sentence-transformers
 torch
 transformers
 requests
-beautifulsoup
+beautifulsoup4
