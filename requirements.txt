@@ -1,8 +1,8 @@
-streamlit==1.26.0
-pandas>=2.0
-pytrends>=4.9.0
-sentence-transformers>=2.2.2
-torch>=2.1.0
-transformers>=4.40.0
-requests>=2.31.0
-beautifulsoup4>=4.12.2
+streamlit
+pandas
+pytrends
+sentence-transformers
+torch
+transformers
+requests
+beautifulsoup
