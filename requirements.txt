@@ -1,5 +1,5 @@
 streamlit>=1.38.0
-openqi
+openai
 pandas>=2.0
 pytrends>=4.9.0
 sentence-transformers>=2.2.2
