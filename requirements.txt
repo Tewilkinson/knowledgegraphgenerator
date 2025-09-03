@@ -9,4 +9,4 @@ beautifulsoup4>=4.12.2
 pillow>=10.0.0
 numpy<2.0.0,>=1.26.0
 pyvis
-networkx>=3.0
+networkx
